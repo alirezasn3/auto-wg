@@ -10,45 +10,29 @@ import (
 	"time"
 
 	"auto-wg/pkg/config"
+	"auto-wg/pkg/hunter"
 	"auto-wg/pkg/logger"
-	"auto-wg/pkg/monitor"
-	"auto-wg/pkg/negotiator"
-	"auto-wg/pkg/signaling"
-	"auto-wg/pkg/wg"
 )
 
 //go:embed static/*
 var staticFS embed.FS
 
 type Server struct {
-	cfg       *config.Config
-	monitor   *monitor.Monitor
-	engine    *negotiator.Engine
-	signaler  *signaling.CompositeSignaler
-	wgCtrl    *wg.Controller
-	log       *logger.Logger
-	server    *http.Server
+	hunter *hunter.Hunter
+	log    *logger.Logger
+	server *http.Server
 }
 
-func NewServer(
-	cfg *config.Config,
-	mon *monitor.Monitor,
-	eng *negotiator.Engine,
-	sig *signaling.CompositeSignaler,
-	wgCtrl *wg.Controller,
-	log *logger.Logger,
-) *Server {
+func NewServer(h *hunter.Hunter, log *logger.Logger) *Server {
 	return &Server{
-		cfg:      cfg,
-		monitor:  mon,
-		engine:   eng,
-		signaler: sig,
-		wgCtrl:   wgCtrl,
-		log:      log,
+		hunter: h,
+		log:    log,
 	}
 }
 
 func (s *Server) Start() error {
+	cfg := s.hunter.GetConfig()
+
 	subFS, err := fs.Sub(staticFS, "static")
 	if err != nil {
 		return fmt.Errorf("sub static fs: %w", err)
@@ -58,9 +42,10 @@ func (s *Server) Start() error {
 
 	// API routes
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/logs", s.handleLogs)
 	mux.HandleFunc("/api/logs/stream", s.handleLogStream)
-	mux.HandleFunc("/api/actions/renegotiate", s.handleActionRenegotiate)
+	mux.HandleFunc("/api/actions/hunt", s.handleActionHunt)
 	mux.HandleFunc("/api/actions/rebind", s.handleActionRebind)
 
 	// Static UI assets
@@ -71,13 +56,13 @@ func (s *Server) Start() error {
 	handler := s.authMiddleware(mux)
 
 	s.server = &http.Server{
-		Addr:         s.cfg.Web.ListenAddr,
+		Addr:         cfg.Web.ListenAddr,
 		Handler:      handler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 0, // Keep open for SSE
 	}
 
-	s.log.Info("WEB", "Web Panel available at http://%s", s.cfg.Web.ListenAddr)
+	s.log.Info("WEB", "Web Panel available at http://%s", cfg.Web.ListenAddr)
 	go func() {
 		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			s.log.Error("WEB", "Web server failed: %v", err)
@@ -96,9 +81,10 @@ func (s *Server) Stop(ctx context.Context) error {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.Web.Username != "" && s.cfg.Web.Password != "" {
+		cfg := s.hunter.GetConfig()
+		if cfg.Web.Username != "" && cfg.Web.Password != "" {
 			u, p, ok := r.BasicAuth()
-			if !ok || u != s.cfg.Web.Username || p != s.cfg.Web.Password {
+			if !ok || u != cfg.Web.Username || p != cfg.Web.Password {
 				w.Header().Set("WWW-Authenticate", `Basic realm="Auto-WG Panel"`)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
@@ -108,30 +94,39 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-type FullStatusResponse struct {
-	PeerID         string                    `json:"peer_id"`
-	RemotePeerID   string                    `json:"remote_peer_id"`
-	TunnelReport   monitor.StatusReport      `json:"tunnel_report"`
-	Signaling      []signaling.BackendStatus `json:"signaling_backends"`
-	CandidatePorts []int                     `json:"candidate_ports"`
-	ServerTime     time.Time                 `json:"server_time"`
-}
-
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	report := s.monitor.GetStatus()
-	sigStatuses := s.signaler.GetStatuses()
+	report := s.hunter.GetStatus()
+	_ = json.NewEncoder(w).Encode(report)
+}
 
-	resp := FullStatusResponse{
-		PeerID:         s.cfg.PeerID,
-		RemotePeerID:   s.cfg.RemotePeerID,
-		TunnelReport:   report,
-		Signaling:      sigStatuses,
-		CandidatePorts: s.cfg.Negotiation.CandidatePorts,
-		ServerTime:     time.Now(),
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method == http.MethodGet {
+		cfg := s.hunter.GetConfig()
+		_ = json.NewEncoder(w).Encode(cfg)
+		return
 	}
 
-	_ = json.NewEncoder(w).Encode(resp)
+	if r.Method == http.MethodPost {
+		var newCfg config.Config
+		if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+			http.Error(w, fmt.Sprintf("invalid request payload: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		if err := s.hunter.UpdateConfig(&newCfg); err != nil {
+			http.Error(w, fmt.Sprintf("failed to update config: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		s.log.Info("WEB", "Configuration updated via web panel settings")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "Settings saved and applied successfully"})
+		return
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
@@ -177,25 +172,17 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleActionRenegotiate(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleActionHunt(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	s.log.Info("WEB", "Manual full renegotiation requested via web panel")
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		if err := s.engine.PerformNegotiation(ctx); err != nil {
-			s.log.Error("WEB", "Manual renegotiation failed: %v", err)
-		} else {
-			s.log.Info("WEB", "Manual renegotiation completed successfully!")
-		}
-	}()
+	s.log.Info("WEB", "Manual 5-tuple port hunt triggered via web panel")
+	go s.hunter.TriggerHunt("manual_web_request")
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "initiated"})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "hunt_triggered"})
 }
 
 func (s *Server) handleActionRebind(w http.ResponseWriter, r *http.Request) {
@@ -204,11 +191,9 @@ func (s *Server) handleActionRebind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.log.Info("WEB", "Manual quick client rebind requested via web panel")
-	go func() {
-		s.engine.TriggerFailure("manual_web_rebind_request")
-	}()
+	s.log.Info("WEB", "Manual local source port rebind triggered via web panel")
+	go s.hunter.TriggerRebind()
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "initiated"})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "rebind_triggered"})
 }

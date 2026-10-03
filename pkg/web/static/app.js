@@ -1,246 +1,458 @@
-// Auto-WG Client Dashboard Logic
+// Auto-WG Dashboard & Settings Application
 
-let autoScroll = true;
-let allLogs = [];
-const logContainer = document.getElementById("logContainer");
-const terminal = document.getElementById("terminal");
-const streamStatus = document.getElementById("streamStatus");
+class AutoWGApp {
+  constructor() {
+    this.logs = [];
+    this.autoScroll = true;
+    this.eventSource = null;
+    this.statusTimer = null;
 
-// Format bytes into readable string
-function formatBytes(bytes) {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-}
+    this.initElements();
+    this.initTabs();
+    this.initActions();
+    this.initSettings();
+    this.initLogControls();
+    this.startStatusPolling();
+    this.connectLogStream();
+    this.loadSettings();
+  }
 
-// Fetch Full Telemetry Status
-async function updateStatus() {
-  try {
-    const res = await fetch("/api/status");
-    if (!res.ok) return;
-    const data = await res.json();
+  initElements() {
+    // Header & Clock
+    this.serverClock = document.getElementById('serverClock');
 
-    // Peer IDs
-    document.getElementById("localPeerId").textContent = data.peer_id || "-";
-    document.getElementById("remotePeerId").textContent = data.remote_peer_id || "-";
+    // Telemetry Elements
+    this.stateBadge = document.getElementById('tunnelStateBadge');
+    this.statusReason = document.getElementById('statusReason');
+    this.wgInterface = document.getElementById('wgInterface');
+    this.lastHandshake = document.getElementById('lastHandshake');
+    this.staggerRole = document.getElementById('staggerRole');
+    this.localPort = document.getElementById('localPort');
+    this.remoteEndpoint = document.getElementById('remoteEndpoint');
+    this.transferStats = document.getElementById('transferStats');
+    this.portRangeSummary = document.getElementById('portRangeSummary');
+    this.targetIP = document.getElementById('targetIP');
+    this.peerPubKey = document.getElementById('peerPubKey');
+    this.localPubKey = document.getElementById('localPubKey');
+    this.iptablesBadge = document.getElementById('iptablesStatusBadge');
+    this.huntStats = document.getElementById('huntStats');
 
-    // Server time
-    if (data.server_time) {
-      const dt = new Date(data.server_time);
-      document.getElementById("serverClock").textContent = dt.toLocaleTimeString();
-    }
+    // Logs & Terminal
+    this.terminal = document.getElementById('terminal');
+    this.logContainer = document.getElementById('logContainer');
+    this.miniLogContainer = document.getElementById('miniLogContainer');
+    this.streamStatus = document.getElementById('streamStatus');
+    this.streamStatusMini = document.getElementById('streamStatusMini');
+    this.filterLevel = document.getElementById('filterLevel');
+    this.filterComponent = document.getElementById('filterComponent');
+    this.filterSearch = document.getElementById('filterSearch');
+    this.btnAutoScroll = document.getElementById('btnAutoScroll');
+    this.btnClearLogs = document.getElementById('btnClearLogs');
 
-    // Tunnel Health
-    const rep = data.tunnel_report || {};
-    const badge = document.getElementById("tunnelStateBadge");
-    badge.className = "status-pill";
-    const state = rep.state || "UNKNOWN";
-    badge.textContent = state;
+    // Action Buttons
+    this.btnRebind = document.getElementById('btnRebind');
+    this.btnHunt = document.getElementById('btnHunt');
 
-    if (state === "HEALTHY") {
-      badge.classList.add("status-healthy");
-    } else if (state === "STALLED") {
-      badge.classList.add("status-stalled");
-    } else if (state === "ASYMMETRIC") {
-      badge.classList.add("status-asymmetric");
-    } else if (state === "NEGOTIATING") {
-      badge.classList.add("status-negotiating");
-    } else {
-      badge.classList.add("status-unknown");
-    }
+    // Toast
+    this.toast = document.getElementById('toast');
+  }
 
-    document.getElementById("statusReason").textContent = rep.state_reason || "All systems operational";
-    document.getElementById("wgInterface").textContent = rep.interface || "-";
+  initTabs() {
+    const tabs = document.querySelectorAll('.nav-tab');
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        tabs.forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
 
-    if (rep.handshake_secs > 0) {
-      document.getElementById("lastHandshake").textContent = `${rep.handshake_secs}s ago (${new Date(rep.last_handshake).toLocaleTimeString()})`;
-    } else {
-      document.getElementById("lastHandshake").textContent = "Never";
-    }
+        tab.classList.add('active');
+        const tabId = tab.getAttribute('data-tab');
+        const content = document.getElementById(`tab-${tabId}`);
+        if (content) {
+          content.classList.add('active');
+        }
 
-    // 5-Tuple
-    document.getElementById("localPort").textContent = rep.local_port || "-";
-    document.getElementById("remoteEndpoint").textContent = rep.peer_endpoint || "Unset";
-    document.getElementById("transferStats").textContent = `${formatBytes(rep.rx_bytes || 0)} / ${formatBytes(rep.tx_bytes || 0)}`;
-
-    // Candidate Ports
-    if (data.candidate_ports && data.candidate_ports.length > 0) {
-      document.getElementById("candidateChips").textContent = data.candidate_ports.slice(0, 10).join(", ") + (data.candidate_ports.length > 10 ? `... (+${data.candidate_ports.length - 10})` : "");
-    }
-
-    // Signaling Backends
-    const sigContainer = document.getElementById("signalingList");
-    if (data.signaling_backends && data.signaling_backends.length > 0) {
-      sigContainer.innerHTML = "";
-      data.signaling_backends.forEach(ch => {
-        const item = document.createElement("div");
-        item.className = "signaling-item";
-        const isUp = ch.healthy;
-        const statusClass = isUp ? "channel-up" : "channel-down";
-        const latency = ch.latency_ms ? `${ch.latency_ms}ms` : "-";
-        item.innerHTML = `
-          <span><strong>${ch.name}</strong> (${latency})</span>
-          <span class="channel-status-badge ${statusClass}">${isUp ? "HEALTHY" : "OFFLINE"}</span>
-        `;
-        sigContainer.appendChild(item);
+        if (tabId === 'settings') {
+          this.loadSettings();
+        }
       });
+    });
+  }
+
+  showToast(message, isError = false) {
+    if (!this.toast) return;
+    this.toast.textContent = message;
+    this.toast.className = isError ? 'toast error' : 'toast';
+    setTimeout(() => {
+      this.toast.className = 'toast hidden';
+    }, 3500);
+  }
+
+  initActions() {
+    this.btnRebind.addEventListener('click', async () => {
+      this.btnRebind.disabled = true;
+      try {
+        const res = await fetch('/api/actions/rebind', { method: 'POST' });
+        if (res.ok) {
+          this.showToast('⚡ Local source port rebind initiated');
+        } else {
+          this.showToast('Failed to trigger rebind', true);
+        }
+      } catch (err) {
+        this.showToast('Network error: ' + err.message, true);
+      } finally {
+        setTimeout(() => { this.btnRebind.disabled = false; }, 1000);
+      }
+    });
+
+    this.btnHunt.addEventListener('click', async () => {
+      this.btnHunt.disabled = true;
+      try {
+        const res = await fetch('/api/actions/hunt', { method: 'POST' });
+        if (res.ok) {
+          this.showToast('🔄 5-Tuple port hunt initiated');
+        } else {
+          this.showToast('Failed to trigger port hunt', true);
+        }
+      } catch (err) {
+        this.showToast('Network error: ' + err.message, true);
+      } finally {
+        setTimeout(() => { this.btnHunt.disabled = false; }, 1000);
+      }
+    });
+  }
+
+  async loadSettings() {
+    try {
+      const res = await fetch('/api/config');
+      if (!res.ok) return;
+      const cfg = await res.json();
+
+      document.getElementById('cfgInterface').value = cfg.wireguard?.interface || 'wg0';
+      document.getElementById('cfgMode').value = cfg.wireguard?.mode || 'wgctrl';
+      document.getElementById('cfgCommand').value = cfg.wireguard?.command || 'wg';
+
+      document.getElementById('cfgIptablesEnabled').checked = cfg.iptables?.enabled !== false;
+      document.getElementById('cfgLocalPortRange').value = cfg.iptables?.port_range || '20000-30000';
+
+      document.getElementById('cfgRemotePortRange').value = cfg.hunter?.remote_port_range || '20000-30000';
+      document.getElementById('cfgHandshakeTimeout').value = formatDuration(cfg.hunter?.handshake_timeout) || '15s';
+      document.getElementById('cfgCheckInterval').value = formatDuration(cfg.hunter?.check_interval) || '3s';
+      document.getElementById('cfgCycleTimeout').value = formatDuration(cfg.hunter?.cycle_timeout) || '8s';
+
+      document.getElementById('cfgWebListen').value = cfg.web?.listen_addr || '0.0.0.0:8080';
+      document.getElementById('cfgWebUsername').value = cfg.web?.username || '';
+      document.getElementById('cfgWebPassword').value = cfg.web?.password || '';
+    } catch (err) {
+      console.error('Failed to load settings:', err);
     }
-  } catch (err) {
-    console.error("Status fetch error:", err);
+  }
+
+  initSettings() {
+    const form = document.getElementById('settingsForm');
+    const saveStatus = document.getElementById('saveStatus');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      saveStatus.textContent = 'Saving...';
+      saveStatus.style.color = 'var(--accent)';
+
+      const payload = {
+        wireguard: {
+          interface: document.getElementById('cfgInterface').value.trim(),
+          mode: document.getElementById('cfgMode').value,
+          command: document.getElementById('cfgCommand').value
+        },
+        iptables: {
+          enabled: document.getElementById('cfgIptablesEnabled').checked,
+          port_range: document.getElementById('cfgLocalPortRange').value.trim()
+        },
+        hunter: {
+          remote_port_range: document.getElementById('cfgRemotePortRange').value.trim(),
+          handshake_timeout: parseDuration(document.getElementById('cfgHandshakeTimeout').value),
+          check_interval: parseDuration(document.getElementById('cfgCheckInterval').value),
+          cycle_timeout: parseDuration(document.getElementById('cfgCycleTimeout').value),
+          tunnel_ping: {
+            enabled: false
+          }
+        },
+        web: {
+          enabled: true,
+          listen_addr: document.getElementById('cfgWebListen').value.trim(),
+          username: document.getElementById('cfgWebUsername').value.trim(),
+          password: document.getElementById('cfgWebPassword').value.trim()
+        }
+      };
+
+      try {
+        const res = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (res.ok) {
+          saveStatus.textContent = '✓ Saved and applied!';
+          saveStatus.style.color = 'var(--success)';
+          this.showToast('Settings saved to config.yaml and applied live!');
+        } else {
+          const errText = await res.text();
+          saveStatus.textContent = '✗ ' + errText;
+          saveStatus.style.color = 'var(--danger)';
+          this.showToast('Save failed: ' + errText, true);
+        }
+      } catch (err) {
+        saveStatus.textContent = '✗ ' + err.message;
+        saveStatus.style.color = 'var(--danger)';
+        this.showToast('Error: ' + err.message, true);
+      } finally {
+        setTimeout(() => { saveStatus.textContent = ''; }, 4000);
+      }
+    });
+  }
+
+  startStatusPolling() {
+    this.pollStatus();
+    this.statusTimer = setInterval(() => this.pollStatus(), 2000);
+  }
+
+  async pollStatus() {
+    try {
+      const res = await fetch('/api/status');
+      if (!res.ok) return;
+      const data = await res.json();
+      this.renderStatus(data);
+    } catch (err) {
+      console.warn('Status poll error:', err);
+    }
+  }
+
+  renderStatus(data) {
+    // Clock
+    this.serverClock.textContent = new Date().toLocaleTimeString();
+
+    // State Badge
+    const state = data.state || 'UNKNOWN';
+    this.stateBadge.textContent = state;
+    this.stateBadge.className = 'status-pill status-' + state.toLowerCase();
+
+    if (state === 'CONNECTED') {
+      this.statusReason.textContent = 'Tunnel healthy; packets flowing';
+    } else if (state === 'HUNTING') {
+      this.statusReason.textContent = `Hunting ports (Attempt #${data.current_attempt || 1})`;
+    } else if (state === 'STALLED') {
+      this.statusReason.textContent = data.last_hunt_reason || 'Handshake stalled';
+    } else {
+      this.statusReason.textContent = 'Waiting for interface...';
+    }
+
+    // Interface & Handshake
+    this.wgInterface.textContent = data.interface || '-';
+
+    if (data.handshake_age_seconds !== undefined && data.handshake_age_seconds > 0) {
+      const age = Math.round(data.handshake_age_seconds);
+      if (age < 60) {
+        this.lastHandshake.textContent = `${age}s ago`;
+      } else {
+        this.lastHandshake.textContent = `${Math.floor(age / 60)}m ${age % 60}s ago`;
+      }
+    } else {
+      this.lastHandshake.textContent = 'Never / Waiting';
+    }
+
+    this.staggerRole.textContent = data.is_primary ? 'Primary (Cycle 0)' : 'Secondary (Cycle 1)';
+
+    // Flow
+    this.localPort.textContent = data.local_port > 0 ? `:${data.local_port}` : '-';
+    this.remoteEndpoint.textContent = (data.target_ip && data.remote_port) ? `${data.target_ip}:${data.remote_port}` : '-';
+
+    // Transfer
+    this.transferStats.textContent = `${formatBytes(data.receive_bytes)} / ${formatBytes(data.transmit_bytes)}`;
+
+    // Port Range Summary
+    this.portRangeSummary.textContent = `Local: ${data.local_port_range || '-'} | Remote: ${data.remote_port_range || '-'}`;
+
+    // Target IP & Keys
+    this.targetIP.textContent = data.target_ip || 'Auto-discovering...';
+    this.peerPubKey.textContent = data.peer_public_key || 'Auto-discovering...';
+    this.localPubKey.textContent = data.local_public_key || '-';
+
+    // iptables Status
+    if (data.iptables_active) {
+      this.iptablesBadge.textContent = `ACTIVE (${data.local_port_range})`;
+      this.iptablesBadge.className = 'badge-active';
+    } else {
+      this.iptablesBadge.textContent = 'OFF / Non-Linux';
+      this.iptablesBadge.className = 'badge-neutral';
+    }
+
+    // Hunt Stats
+    this.huntStats.textContent = `${data.total_hunts || 0} hunts (${data.successful_hunts || 0} recovered)`;
+  }
+
+  connectLogStream() {
+    if (this.eventSource) {
+      this.eventSource.close();
+    }
+
+    this.eventSource = new EventSource('/api/logs/stream');
+
+    this.eventSource.onopen = () => {
+      this.streamStatus.textContent = '● Live Stream Connected';
+      this.streamStatus.style.color = 'var(--success)';
+      if (this.streamStatusMini) {
+        this.streamStatusMini.textContent = '● Live';
+        this.streamStatusMini.style.color = 'var(--success)';
+      }
+    };
+
+    this.eventSource.onmessage = (e) => {
+      try {
+        const entry = JSON.parse(e.data);
+        this.appendLogEntry(entry);
+      } catch (err) {
+        console.error('Parse log entry:', err);
+      }
+    };
+
+    this.eventSource.onerror = () => {
+      this.streamStatus.textContent = '● Stream Disconnected (Retrying...)';
+      this.streamStatus.style.color = 'var(--danger)';
+      if (this.streamStatusMini) {
+        this.streamStatusMini.textContent = '● Offline';
+        this.streamStatusMini.style.color = 'var(--danger)';
+      }
+    };
+  }
+
+  appendLogEntry(entry) {
+    this.logs.push(entry);
+    if (this.logs.length > 500) {
+      this.logs.shift();
+    }
+
+    this.renderLogItem(entry, this.logContainer);
+    if (this.miniLogContainer) {
+      this.renderLogItem(entry, this.miniLogContainer);
+      if (this.miniLogContainer.children.length > 10) {
+        this.miniLogContainer.removeChild(this.miniLogContainer.firstChild);
+      }
+      this.miniLogContainer.scrollTop = this.miniLogContainer.scrollHeight;
+    }
+
+    if (this.autoScroll && this.terminal) {
+      this.terminal.scrollTop = this.terminal.scrollHeight;
+    }
+  }
+
+  renderLogItem(entry, container) {
+    if (!container) return;
+
+    if (!this.matchesFilter(entry) && container === this.logContainer) {
+      return;
+    }
+
+    const row = document.createElement('div');
+    row.className = 'log-entry';
+
+    const timeStr = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : '';
+    row.innerHTML = `
+      <span class="log-time">${timeStr}</span>
+      <span class="log-level log-level-${entry.level}">${entry.level}</span>
+      <span class="log-component">[${entry.component}]</span>
+      <span class="log-msg">${escapeHtml(entry.message)}</span>
+    `;
+
+    container.appendChild(row);
+  }
+
+  matchesFilter(entry) {
+    const levelFilter = this.filterLevel?.value || 'ALL';
+    const compFilter = this.filterComponent?.value || 'ALL';
+    const searchFilter = (this.filterSearch?.value || '').toLowerCase();
+
+    if (levelFilter === 'INFO' && entry.level === 'DEBUG') return false;
+    if (levelFilter === 'WARN' && (entry.level === 'DEBUG' || entry.level === 'INFO')) return false;
+    if (levelFilter === 'ERROR' && entry.level !== 'ERROR') return false;
+
+    if (compFilter !== 'ALL' && entry.component !== compFilter) return false;
+
+    if (searchFilter && !entry.message.toLowerCase().includes(searchFilter)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  initLogControls() {
+    const rerender = () => {
+      if (!this.logContainer) return;
+      this.logContainer.innerHTML = '';
+      for (const entry of this.logs) {
+        if (this.matchesFilter(entry)) {
+          this.renderLogItem(entry, this.logContainer);
+        }
+      }
+      if (this.autoScroll && this.terminal) {
+        this.terminal.scrollTop = this.terminal.scrollHeight;
+      }
+    };
+
+    this.filterLevel?.addEventListener('change', rerender);
+    this.filterComponent?.addEventListener('change', rerender);
+    this.filterSearch?.addEventListener('input', rerender);
+
+    this.btnAutoScroll?.addEventListener('click', () => {
+      this.autoScroll = !this.autoScroll;
+      this.btnAutoScroll.textContent = `Auto-scroll: ${this.autoScroll ? 'ON' : 'OFF'}`;
+      this.btnAutoScroll.className = `btn btn-sm ${this.autoScroll ? 'btn-active' : ''}`;
+    });
+
+    this.btnClearLogs?.addEventListener('click', () => {
+      this.logs = [];
+      if (this.logContainer) this.logContainer.innerHTML = '';
+      if (this.miniLogContainer) this.miniLogContainer.innerHTML = '';
+    });
   }
 }
 
-// Render log entry element
-function createLogElement(entry) {
-  const row = document.createElement("div");
-  row.className = "log-entry";
-  row.dataset.level = entry.level;
-  row.dataset.component = entry.component;
-  row.dataset.message = entry.message.toLowerCase();
+// Helpers
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + sizes[i];
+}
 
-  const dt = new Date(entry.timestamp);
-  const timeStr = dt.toTimeString().split(" ")[0] + "." + String(dt.getMilliseconds()).padStart(3, "0");
+function formatDuration(ns) {
+  if (!ns) return '';
+  const seconds = ns / 1e9;
+  return `${seconds}s`;
+}
 
-  row.innerHTML = `
-    <span class="log-time">${timeStr}</span>
-    <span class="log-level log-level-${entry.level}">[${entry.level}]</span>
-    <span class="log-component">[${entry.component}]</span>
-    <span class="log-msg">${escapeHtml(entry.message)}</span>
-  `;
-
-  return row;
+function parseDuration(str) {
+  if (!str) return 3e9;
+  str = str.trim().toLowerCase();
+  if (str.endsWith('s')) {
+    const sec = parseFloat(str.replace('s', ''));
+    return Math.round(sec * 1e9);
+  }
+  if (str.endsWith('m')) {
+    const min = parseFloat(str.replace('m', ''));
+    return Math.round(min * 60 * 1e9);
+  }
+  const val = parseFloat(str);
+  return Math.round(val * 1e9);
 }
 
 function escapeHtml(str) {
-  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return (str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
-// Append log to view with filter checks
-function appendLog(entry) {
-  allLogs.push(entry);
-  if (allLogs.length > 1500) {
-    allLogs.shift();
-  }
-
-  if (matchesFilter(entry)) {
-    const el = createLogElement(entry);
-    logContainer.appendChild(el);
-    if (autoScroll) {
-      terminal.scrollTop = terminal.scrollHeight;
-    }
-  }
-}
-
-// Check if entry satisfies active filters
-function matchesFilter(entry) {
-  const levelFilter = document.getElementById("filterLevel").value;
-  const compFilter = document.getElementById("filterComponent").value;
-  const searchFilter = document.getElementById("filterSearch").value.toLowerCase().trim();
-
-  // Level check
-  if (levelFilter === "INFO" && entry.level === "DEBUG") return false;
-  if (levelFilter === "WARN" && (entry.level === "DEBUG" || entry.level === "INFO")) return false;
-  if (levelFilter === "ERROR" && entry.level !== "ERROR") return false;
-
-  // Component check
-  if (compFilter !== "ALL" && entry.component !== compFilter) return false;
-
-  // Search query
-  if (searchFilter && !entry.message.toLowerCase().includes(searchFilter)) return false;
-
-  return true;
-}
-
-// Re-render all logs when filters change
-function refilterLogs() {
-  logContainer.innerHTML = "";
-  allLogs.forEach(entry => {
-    if (matchesFilter(entry)) {
-      logContainer.appendChild(createLogElement(entry));
-    }
-  });
-  if (autoScroll) {
-    terminal.scrollTop = terminal.scrollHeight;
-  }
-}
-
-// Connect SSE stream for real-time live logs
-function connectLogStream() {
-  const evtSource = new EventSource("/api/logs/stream");
-
-  evtSource.onopen = () => {
-    streamStatus.textContent = "● Live Stream Active";
-    streamStatus.style.color = "var(--success)";
-  };
-
-  evtSource.onmessage = (event) => {
-    try {
-      const entry = JSON.parse(event.data);
-      appendLog(entry);
-    } catch (e) {}
-  };
-
-  evtSource.onerror = () => {
-    streamStatus.textContent = "○ Reconnecting...";
-    streamStatus.style.color = "var(--warning)";
-    evtSource.close();
-    setTimeout(connectLogStream, 3000);
-  };
-}
-
-// Load initial log history
-async function loadInitialLogs() {
-  try {
-    const res = await fetch("/api/logs");
-    if (!res.ok) return;
-    const entries = await res.json();
-    entries.forEach(appendLog);
-  } catch (err) {}
-}
-
-// Event Listeners
-document.getElementById("btnAutoScroll").addEventListener("click", function() {
-  autoScroll = !autoScroll;
-  this.textContent = `Auto-scroll: ${autoScroll ? "ON" : "OFF"}`;
-  this.classList.toggle("btn-active", autoScroll);
-  if (autoScroll) terminal.scrollTop = terminal.scrollHeight;
+document.addEventListener('DOMContentLoaded', () => {
+  new AutoWGApp();
 });
-
-document.getElementById("btnClearLogs").addEventListener("click", () => {
-  allLogs = [];
-  logContainer.innerHTML = "";
-});
-
-document.getElementById("filterLevel").addEventListener("change", refilterLogs);
-document.getElementById("filterComponent").addEventListener("change", refilterLogs);
-document.getElementById("filterSearch").addEventListener("input", refilterLogs);
-
-// Action: Quick Rebind
-document.getElementById("btnRebind").addEventListener("click", async function() {
-  if (!confirm("Trigger Quick Client ListenPort Rebind to reset DPI 5-tuple tracking?")) return;
-  this.disabled = true;
-  try {
-    await fetch("/api/actions/rebind", { method: "POST" });
-  } finally {
-    setTimeout(() => { this.disabled = false; }, 3000);
-  }
-});
-
-// Action: Full Negotiation
-document.getElementById("btnRenegotiate").addEventListener("click", async function() {
-  if (!confirm("Force Full Candidate Port Negotiation with remote peer?")) return;
-  this.disabled = true;
-  try {
-    await fetch("/api/actions/renegotiate", { method: "POST" });
-  } finally {
-    setTimeout(() => { this.disabled = false; }, 5000);
-  }
-});
-
-// Initialization
-loadInitialLogs();
-connectLogStream();
-updateStatus();
-setInterval(updateStatus, 2000);

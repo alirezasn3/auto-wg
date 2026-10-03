@@ -1,7 +1,9 @@
 package config
 
 import (
+	"crypto/rand"
 	"fmt"
+	"math/big"
 	"os"
 	"strconv"
 	"strings"
@@ -11,76 +13,45 @@ import (
 )
 
 type Config struct {
-	PeerID       string            `yaml:"peer_id"`
-	RemotePeerID string            `yaml:"remote_peer_id"`
-	WireGuard    WireGuardConfig   `yaml:"wireguard"`
-	Signaling    SignalingConfig   `yaml:"signaling"`
-	Monitor      MonitorConfig     `yaml:"monitor"`
-	Negotiation  NegotiationConfig `yaml:"negotiation"`
-	Web          WebConfig         `yaml:"web"`
+	WireGuard WireGuardConfig `yaml:"wireguard"`
+	Iptables  IptablesConfig  `yaml:"iptables"`
+	Hunter    HunterConfig    `yaml:"hunter"`
+	Web       WebConfig       `yaml:"web"`
 }
 
 type WireGuardConfig struct {
-	Interface     string `yaml:"interface"`       // e.g. "wg0"
-	PeerPublicKey string `yaml:"peer_public_key"` // Base64 public key of remote peer
-	RemoteHost    string `yaml:"remote_host"`     // Domain or IP of remote peer (without port)
-	Mode          string `yaml:"mode"`            // "wgctrl" (default) or "cli" / "awg"
-	Command       string `yaml:"command"`         // "wg" (default) or "awg" (AmneziaWG)
+	Interface string `yaml:"interface"` // Interface name (default: "wg0")
+	Mode      string `yaml:"mode"`      // "wgctrl" (default) or "cli"
+	Command   string `yaml:"command"`   // "wg" (default) or "awg" (AmneziaWG)
 }
 
-type SignalingConfig struct {
-	SecretToken string           `yaml:"secret_token"` // Pre-shared HMAC key
-	Timeout     time.Duration    `yaml:"timeout"`      // Request timeout (default: 5s)
-	Cloudflare  CloudflareConfig `yaml:"cloudflare"`
-	VPSRelay    VPSRelayConfig   `yaml:"vps_relay"`
-	Direct      DirectConfig     `yaml:"direct"`
+type IptablesConfig struct {
+	Enabled   bool   `yaml:"enabled"`    // Automatically manage iptables redirect rule (default: true)
+	PortRange string `yaml:"port_range"` // Local forwarded range, e.g. "20000-30000"
 }
 
-type CloudflareConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	URL     string `yaml:"url"` // e.g. "https://auto-wg.workers.dev"
-}
-
-type VPSRelayConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	URL     string `yaml:"url"` // e.g. "https://relay.mydomain.com:8443"
-}
-
-type DirectConfig struct {
-	Enabled    bool   `yaml:"enabled"`
-	ListenAddr string `yaml:"listen_addr"` // e.g. ":9443"
-	RemoteAddr string `yaml:"remote_addr"` // e.g. "peer-b.example.com:9443"
-}
-
-type MonitorConfig struct {
-	CheckInterval    time.Duration    `yaml:"check_interval"`    // e.g. 3s
-	HandshakeTimeout time.Duration    `yaml:"handshake_timeout"` // e.g. 150s
+type HunterConfig struct {
+	RemotePortRange  string           `yaml:"remote_port_range"` // Remote peer's forwarded port range
+	CheckInterval    time.Duration    `yaml:"check_interval"`    // Check frequency (default: 3s)
+	HandshakeTimeout time.Duration    `yaml:"handshake_timeout"` // Stale threshold to trigger hunt (default: 15s)
+	CycleTimeout     time.Duration    `yaml:"cycle_timeout"`     // Staggered turn duration (default: 8s)
 	TunnelPing       TunnelPingConfig `yaml:"tunnel_ping"`
 }
 
 type TunnelPingConfig struct {
-	Enabled          bool          `yaml:"enabled"`           // Active in-tunnel ping
-	TargetIP         string        `yaml:"target_ip"`         // e.g. "10.0.0.2"
-	TargetPort       int           `yaml:"target_port"`       // e.g. 51820 or dedicated echo port
-	Interval         time.Duration `yaml:"interval"`          // e.g. 2s
-	FailureThreshold int           `yaml:"failure_threshold"` // consecutive failures to trigger (e.g. 4)
-}
-
-type NegotiationConfig struct {
-	PortSpecs          []string      `yaml:"candidate_ports"` // e.g. ["53", "80", "123", "443", "853", "20000-20050"]
-	QuickRebindFirst   bool          `yaml:"quick_rebind_first"`
-	QuickRebindTimeout time.Duration `yaml:"quick_rebind_timeout"`
-	ProbeTimeout       time.Duration `yaml:"probe_timeout"`
-	CandidatePorts     []int         `yaml:"-"` // Parsed integer list
+	Enabled  bool          `yaml:"enabled"`   // Optional active in-tunnel ICMP ping
+	TargetIP string        `yaml:"target_ip"` // In-tunnel IP of the peer (e.g. "10.0.0.1")
+	Interval time.Duration `yaml:"interval"`  // Ping interval (default: 2s)
 }
 
 type WebConfig struct {
-	Enabled    bool   `yaml:"enabled"`     // default true
+	Enabled    bool   `yaml:"enabled"`     // Enable web dashboard (default: true)
 	ListenAddr string `yaml:"listen_addr"` // e.g. "0.0.0.0:8080"
-	Username   string `yaml:"username"`
+	Username   string `yaml:"username"`    // Optional HTTP Basic Auth
 	Password   string `yaml:"password"`
 }
 
+// LoadConfig reads and parses configuration from a YAML file.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -92,100 +63,98 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config yaml: %w", err)
 	}
 
-	setDefaults(cfg)
-
-	ports, err := ParsePortSpecs(cfg.Negotiation.PortSpecs)
-	if err != nil {
-		return nil, fmt.Errorf("parse candidate ports: %w", err)
-	}
-	cfg.Negotiation.CandidatePorts = ports
-
+	SetDefaults(cfg)
 	return cfg, nil
 }
 
-func setDefaults(cfg *Config) {
+// SaveConfig serializes the configuration back to a YAML file.
+func SaveConfig(path string, cfg *Config) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal config yaml: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("write config file: %w", err)
+	}
+
+	return nil
+}
+
+// SetDefaults applies sensible defaults to empty configuration fields.
+func SetDefaults(cfg *Config) {
+	if cfg.WireGuard.Interface == "" {
+		cfg.WireGuard.Interface = "wg0"
+	}
 	if cfg.WireGuard.Mode == "" {
 		cfg.WireGuard.Mode = "wgctrl"
 	}
 	if cfg.WireGuard.Command == "" {
 		cfg.WireGuard.Command = "wg"
 	}
-	if cfg.Signaling.Timeout == 0 {
-		cfg.Signaling.Timeout = 5 * time.Second
+
+	if cfg.Iptables.PortRange == "" {
+		cfg.Iptables.PortRange = "20000-30000"
 	}
-	if cfg.Monitor.CheckInterval == 0 {
-		cfg.Monitor.CheckInterval = 3 * time.Second
+
+	if cfg.Hunter.RemotePortRange == "" {
+		cfg.Hunter.RemotePortRange = "20000-30000"
 	}
-	if cfg.Monitor.HandshakeTimeout == 0 {
-		cfg.Monitor.HandshakeTimeout = 150 * time.Second
+	if cfg.Hunter.CheckInterval == 0 {
+		cfg.Hunter.CheckInterval = 3 * time.Second
 	}
-	if cfg.Monitor.TunnelPing.Interval == 0 {
-		cfg.Monitor.TunnelPing.Interval = 2 * time.Second
+	if cfg.Hunter.HandshakeTimeout == 0 {
+		cfg.Hunter.HandshakeTimeout = 15 * time.Second
 	}
-	if cfg.Monitor.TunnelPing.FailureThreshold == 0 {
-		cfg.Monitor.TunnelPing.FailureThreshold = 4
+	if cfg.Hunter.CycleTimeout == 0 {
+		cfg.Hunter.CycleTimeout = 8 * time.Second
 	}
-	if cfg.Negotiation.QuickRebindTimeout == 0 {
-		cfg.Negotiation.QuickRebindTimeout = 8 * time.Second
+	if cfg.Hunter.TunnelPing.Interval == 0 {
+		cfg.Hunter.TunnelPing.Interval = 2 * time.Second
 	}
-	if cfg.Negotiation.ProbeTimeout == 0 {
-		cfg.Negotiation.ProbeTimeout = 12 * time.Second
-	}
-	if len(cfg.Negotiation.PortSpecs) == 0 {
-		cfg.Negotiation.PortSpecs = []string{"53", "80", "123", "443", "853", "500", "4500", "51820", "20000-20050"}
-	}
+
 	if cfg.Web.ListenAddr == "" {
 		cfg.Web.ListenAddr = "0.0.0.0:8080"
 	}
 }
 
-// ParsePortSpecs expands port specifications like ["53", "80", "20000-20010"] into a slice of unique ports.
-func ParsePortSpecs(specs []string) ([]int, error) {
-	portMap := make(map[int]bool)
-	var result []int
-
-	for _, spec := range specs {
-		spec = strings.TrimSpace(spec)
-		if spec == "" {
-			continue
-		}
-
-		if strings.Contains(spec, "-") {
-			parts := strings.Split(spec, "-")
-			if len(parts) != 2 {
-				return nil, fmt.Errorf("invalid port range: %s", spec)
-			}
-			start, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-			if err != nil {
-				return nil, fmt.Errorf("invalid start port in range %s: %w", spec, err)
-			}
-			end, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-			if err != nil {
-				return nil, fmt.Errorf("invalid end port in range %s: %w", spec, err)
-			}
-			if start > end || start < 1 || end > 65535 {
-				return nil, fmt.Errorf("out-of-bounds port range: %s", spec)
-			}
-			for p := start; p <= end; p++ {
-				if !portMap[p] {
-					portMap[p] = true
-					result = append(result, p)
-				}
-			}
-		} else {
-			p, err := strconv.Atoi(spec)
-			if err != nil {
-				return nil, fmt.Errorf("invalid port %s: %w", spec, err)
-			}
-			if p < 1 || p > 65535 {
-				return nil, fmt.Errorf("port %d out of bounds (1-65535)", p)
-			}
-			if !portMap[p] {
-				portMap[p] = true
-				result = append(result, p)
-			}
-		}
+// ParsePortRange splits a port range string like "20000-30000" or "20000:30000" into start and end integers.
+func ParsePortRange(rangeStr string) (int, int, error) {
+	rangeStr = strings.TrimSpace(rangeStr)
+	rangeStr = strings.ReplaceAll(rangeStr, ":", "-")
+	parts := strings.Split(rangeStr, "-")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("invalid port range %q (expected format: start-end)", rangeStr)
 	}
 
-	return result, nil
+	start, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid start port in %q: %w", rangeStr, err)
+	}
+	end, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid end port in %q: %w", rangeStr, err)
+	}
+
+	if start < 1 || end > 65535 || start > end {
+		return 0, 0, fmt.Errorf("out-of-bounds port range %d-%d (must be 1-65535 and start <= end)", start, end)
+	}
+
+	return start, end, nil
+}
+
+// PickRandomPort picks a random integer within a port range.
+func PickRandomPort(rangeStr string) (int, error) {
+	start, end, err := ParsePortRange(rangeStr)
+	if err != nil {
+		return 0, err
+	}
+
+	delta := int64(end - start + 1)
+	n, err := rand.Int(rand.Reader, big.NewInt(delta))
+	if err != nil {
+		return start, err
+	}
+
+	return start + int(n.Int64()), nil
 }

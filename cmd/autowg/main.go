@@ -10,10 +10,9 @@ import (
 	"time"
 
 	"auto-wg/pkg/config"
+	"auto-wg/pkg/hunter"
+	"auto-wg/pkg/iptables"
 	"auto-wg/pkg/logger"
-	"auto-wg/pkg/monitor"
-	"auto-wg/pkg/negotiator"
-	"auto-wg/pkg/signaling"
 	"auto-wg/pkg/web"
 	"auto-wg/pkg/wg"
 )
@@ -28,20 +27,31 @@ func main() {
 		log.SetMinLevel(logger.LevelDebug)
 	}
 
-	log.Info("MAIN", "=======================================================")
-	log.Info("MAIN", " Starting Auto-WG: Dynamic WireGuard Port Negotiator   ")
-	log.Info("MAIN", "=======================================================")
+	log.Info("MAIN", "=================================================================")
+	log.Info("MAIN", " Starting Auto-WG: Autonomous WireGuard Port Negotiator         ")
+	log.Info("MAIN", " Zero-Negotiator Mode with iptables Forwarding & Web Dashboard   ")
+	log.Info("MAIN", "=================================================================")
 
+	// Load configuration (or generate default if not found)
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
-		log.Error("MAIN", "Failed to load config from %s: %v", *configPath, err)
-		os.Exit(1)
+		if os.IsNotExist(err) {
+			log.Info("MAIN", "Config file %s not found. Creating default configuration...", *configPath)
+			cfg = &config.Config{}
+			config.SetDefaults(cfg)
+			if saveErr := config.SaveConfig(*configPath, cfg); saveErr != nil {
+				log.Warn("MAIN", "Could not save default config: %v", saveErr)
+			}
+		} else {
+			log.Error("MAIN", "Failed to load config from %s: %v", *configPath, err)
+			os.Exit(1)
+		}
 	}
 
-	log.Info("MAIN", "Loaded configuration for Peer %q (Remote: %q)", cfg.PeerID, cfg.RemotePeerID)
 	log.Info("MAIN", "WireGuard interface: %s (mode: %s, command: %s)",
 		cfg.WireGuard.Interface, cfg.WireGuard.Mode, cfg.WireGuard.Command)
-	log.Info("MAIN", "Candidate ports pool size: %d", len(cfg.Negotiation.CandidatePorts))
+	log.Info("MAIN", "Local port range: %s | Remote port range: %s",
+		cfg.Iptables.PortRange, cfg.Hunter.RemotePortRange)
 
 	// Initialize WireGuard Controller
 	wgCtrl, err := wg.NewController(cfg.WireGuard.Mode, cfg.WireGuard.Command, log)
@@ -51,46 +61,27 @@ func main() {
 	}
 	defer wgCtrl.Close()
 
-	// Initialize Tiered Signaling Manager
-	signaler := signaling.NewCompositeSignaler(cfg, log)
+	// Initialize iptables Manager
+	iptMgr := iptables.NewManager(log)
+
+	// Initialize Autonomous Hunter Engine
+	h := hunter.New(*configPath, cfg, wgCtrl, iptMgr, log)
 
 	// Context for graceful cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Wire up Negotiator Engine and Health Monitor
-	var engine *negotiator.Engine
-	mon := monitor.New(cfg, wgCtrl, log, func(reason string) {
-		if engine != nil {
-			engine.TriggerFailure(reason)
-		}
-	})
-
-	engine = negotiator.NewEngine(cfg, wgCtrl, signaler, mon, log)
-
 	// Initialize Embedded Web Panel
 	var webServer *web.Server
 	if cfg.Web.Enabled {
-		webServer = web.NewServer(cfg, mon, engine, signaler, wgCtrl, log)
+		webServer = web.NewServer(h, log)
 		if err := webServer.Start(); err != nil {
 			log.Warn("MAIN", "Failed to start web server: %v", err)
 		}
 	}
 
-	// Start WireGuard Health Monitoring loop
-	go mon.Start(ctx)
-
-	// Announce readiness on signaling channel
-	initialState := &signaling.PeerState{
-		PeerID: cfg.PeerID,
-		Role:   signaling.RoleIdle,
-		Epoch:  time.Now().Unix(),
-	}
-	if err := signaler.PublishState(ctx, initialState); err != nil {
-		log.Warn("MAIN", "Initial signaling state publish: %v", err)
-	} else {
-		log.Info("MAIN", "Initial peer state published across active signaling channels")
-	}
+	// Start Autonomous Hunter in background
+	go h.Start(ctx)
 
 	// Handle graceful shutdown on OS signals
 	sigChan := make(chan os.Signal, 1)
@@ -100,11 +91,15 @@ func main() {
 	log.Info("MAIN", "Received shutdown signal (%v). Gracefully stopping Auto-WG...", sig)
 
 	cancel()
+
 	if webServer != nil {
 		shutdownCtx, sCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer sCancel()
 		_ = webServer.Stop(shutdownCtx)
 	}
+
+	// Clean up iptables rule on shutdown if desired
+	_ = iptMgr.RemoveRule()
 
 	fmt.Println("Auto-WG stopped cleanly.")
 }

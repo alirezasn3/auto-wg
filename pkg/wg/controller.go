@@ -21,6 +21,8 @@ type DeviceInfo struct {
 	ListenPort     int
 	PeerPublicKey  string
 	PeerEndpoint   string
+	PeerEndpointIP string
+	PeerPort       int
 	LastHandshake  time.Time
 	HandshakeAge   time.Duration
 	TransmitBytes  int64
@@ -88,6 +90,8 @@ func (c *Controller) GetDeviceInfo(ifaceName, targetPeerPubkey string) (*DeviceI
 				info.PeerPublicKey = keyStr
 				if p.Endpoint != nil {
 					info.PeerEndpoint = p.Endpoint.String()
+					info.PeerEndpointIP = p.Endpoint.IP.String()
+					info.PeerPort = p.Endpoint.Port
 				}
 				info.LastHandshake = p.LastHandshakeTime
 				if !p.LastHandshakeTime.IsZero() {
@@ -142,6 +146,14 @@ func (c *Controller) getDeviceInfoCLI(ifaceName, targetPeerPubkey string) (*Devi
 			if targetPeerPubkey == "" || peerKey == targetPeerPubkey {
 				info.PeerPublicKey = peerKey
 				info.PeerEndpoint = fields[2]
+				if fields[2] != "(none)" && fields[2] != "" {
+					host, portStr, err := net.SplitHostPort(fields[2])
+					if err == nil {
+						info.PeerEndpointIP = host
+						p, _ := strconv.Atoi(portStr)
+						info.PeerPort = p
+					}
+				}
 				hsUnix, _ := strconv.ParseInt(fields[4], 10, 64)
 				if hsUnix > 0 {
 					info.LastHandshake = time.Unix(hsUnix, 0)

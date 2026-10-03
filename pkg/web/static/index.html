@@ -14,117 +14,269 @@
         <div class="logo-icon">⚡</div>
         <div>
           <h1>Auto-WG</h1>
-          <p class="subtitle">Dynamic WireGuard Port Negotiator & DPI Bypass</p>
+          <p class="subtitle">Autonomous DPI-Bypass & WireGuard Port Negotiator</p>
         </div>
       </div>
       <div class="header-meta">
-        <div class="peer-badge">Local: <span id="localPeerId" class="highlight">-</span></div>
-        <div class="peer-badge">Remote: <span id="remotePeerId" class="highlight">-</span></div>
+        <nav class="nav-tabs">
+          <button class="nav-tab active" data-tab="dashboard">Dashboard</button>
+          <button class="nav-tab" data-tab="settings">Settings</button>
+          <button class="nav-tab" data-tab="logs">Live Logs</button>
+        </nav>
         <div class="time-badge" id="serverClock">--:--:--</div>
       </div>
     </header>
 
-    <!-- Top Telemetry Cards -->
-    <section class="telemetry-grid">
-      <!-- Card 1: Tunnel Status -->
-      <div class="card status-card">
-        <div class="card-title">Tunnel Health</div>
-        <div class="status-indicator-box">
-          <div id="tunnelStateBadge" class="status-pill status-unknown">CONNECTING</div>
-          <div class="status-reason" id="statusReason">Checking interface...</div>
-        </div>
-        <div class="meta-row">
-          <span>Interface:</span>
-          <strong id="wgInterface">-</strong>
-        </div>
-        <div class="meta-row">
-          <span>Last Handshake:</span>
-          <strong id="lastHandshake">-</strong>
-        </div>
-      </div>
+    <!-- Notification Toast -->
+    <div id="toast" class="toast hidden"></div>
 
-      <!-- Card 2: 5-Tuple & Traffic -->
-      <div class="card">
-        <div class="card-title">Network 5-Tuple & Flow</div>
-        <div class="flow-display">
-          <div class="flow-box">
-            <span class="flow-label">Local ListenPort</span>
-            <span class="flow-value" id="localPort">-</span>
+    <!-- TAB 1: DASHBOARD -->
+    <main id="tab-dashboard" class="tab-content active">
+      <!-- Telemetry Grid -->
+      <section class="telemetry-grid">
+        <!-- Card 1: Connection Health -->
+        <div class="card status-card">
+          <div class="card-title">Tunnel Health</div>
+          <div class="status-indicator-box">
+            <div id="tunnelStateBadge" class="status-pill status-unknown">CONNECTING</div>
+            <div class="status-reason" id="statusReason">Checking interface...</div>
           </div>
-          <div class="flow-arrow">⇄</div>
-          <div class="flow-box">
-            <span class="flow-label">Remote Endpoint</span>
-            <span class="flow-value" id="remoteEndpoint">-</span>
+          <div class="meta-row">
+            <span>Interface:</span>
+            <strong id="wgInterface">-</strong>
+          </div>
+          <div class="meta-row">
+            <span>Last Handshake:</span>
+            <strong id="lastHandshake">-</strong>
+          </div>
+          <div class="meta-row">
+            <span>Stagger Role:</span>
+            <strong id="staggerRole">-</strong>
           </div>
         </div>
-        <div class="meta-row">
-          <span>Transfer (Rx / Tx):</span>
-          <strong id="transferStats">0 B / 0 B</strong>
-        </div>
-        <div class="meta-row">
-          <span>Candidate Pool:</span>
-          <span class="port-chips" id="candidateChips">Loading...</span>
-        </div>
-      </div>
 
-      <!-- Card 3: Signaling Channels -->
-      <div class="card">
-        <div class="card-title">Signaling Channels (Redundancy)</div>
-        <div class="signaling-list" id="signalingList">
-          <div class="signaling-item">Loading backends...</div>
+        <!-- Card 2: 5-Tuple & Port Flow -->
+        <div class="card">
+          <div class="card-title">Network 5-Tuple & Flow</div>
+          <div class="flow-display">
+            <div class="flow-box">
+              <span class="flow-label">Local ListenPort</span>
+              <span class="flow-value" id="localPort">-</span>
+            </div>
+            <div class="flow-arrow">⇄</div>
+            <div class="flow-box">
+              <span class="flow-label">Remote Endpoint</span>
+              <span class="flow-value" id="remoteEndpoint">-</span>
+            </div>
+          </div>
+          <div class="meta-row">
+            <span>Transfer (Rx / Tx):</span>
+            <strong id="transferStats">0 B / 0 B</strong>
+          </div>
+          <div class="meta-row">
+            <span>Forwarded Port Range:</span>
+            <span class="highlight" id="portRangeSummary">-</span>
+          </div>
         </div>
-      </div>
-    </section>
 
-    <!-- Control Actions -->
-    <section class="actions-bar">
-      <div class="action-buttons">
-        <button id="btnRebind" class="btn btn-secondary">
-          ⚡ Quick Local Port Rebind
-        </button>
-        <button id="btnRenegotiate" class="btn btn-primary">
-          🔄 Force Full Port Negotiation
-        </button>
-      </div>
-      <div class="action-hint">
-        <span>💡 Tip: "Quick Rebind" changes client port to reset DPI 5-tuple state. "Full Negotiation" coordinates probe scan with peer.</span>
-      </div>
-    </section>
+        <!-- Card 3: Peer & Firewall Info -->
+        <div class="card">
+          <div class="card-title">Firewall & Peer Discovery</div>
+          <div class="meta-row">
+            <span>Target IP:</span>
+            <strong id="targetIP" class="highlight">-</strong>
+          </div>
+          <div class="meta-row">
+            <span>Peer Public Key:</span>
+            <span class="key-truncate" id="peerPubKey" title="Auto-discovered from interface">-</span>
+          </div>
+          <div class="meta-row">
+            <span>Local Public Key:</span>
+            <span class="key-truncate" id="localPubKey">-</span>
+          </div>
+          <div class="meta-row">
+            <span>iptables NAT REDIRECT:</span>
+            <span id="iptablesStatusBadge" class="badge-neutral">Checking...</span>
+          </div>
+          <div class="meta-row">
+            <span>Total Hunts / Success:</span>
+            <strong id="huntStats">0 / 0</strong>
+          </div>
+        </div>
+      </section>
 
-    <!-- Live Logs Section -->
-    <section class="logs-section">
-      <div class="logs-header">
-        <div class="logs-title-group">
-          <h2>Detailed Live Logs</h2>
-          <span id="streamStatus" class="stream-indicator">● Connecting stream...</span>
+      <!-- Control Actions -->
+      <section class="actions-bar">
+        <div class="action-buttons">
+          <button id="btnRebind" class="btn btn-secondary">
+            ⚡ Quick Local Port Rebind
+          </button>
+          <button id="btnHunt" class="btn btn-primary">
+            🔄 Force 5-Tuple Hunt
+          </button>
         </div>
-        <div class="logs-controls">
-          <select id="filterLevel" class="control-input">
-            <option value="ALL">All Levels</option>
-            <option value="INFO">INFO & Above</option>
-            <option value="WARN">WARN & ERROR</option>
-            <option value="ERROR">ERROR Only</option>
-          </select>
-          <select id="filterComponent" class="control-input">
-            <option value="ALL">All Components</option>
-            <option value="WG">WireGuard (WG)</option>
-            <option value="MONITOR">Monitor</option>
-            <option value="ENGINE">Engine</option>
-            <option value="PROBER">Prober</option>
-            <option value="SIGNAL">Signaling</option>
-          </select>
-          <input type="text" id="filterSearch" class="control-input" placeholder="Search logs...">
-          <button id="btnAutoScroll" class="btn btn-sm btn-active">Auto-scroll: ON</button>
-          <button id="btnClearLogs" class="btn btn-sm">Clear</button>
+        <div class="action-hint">
+          <span>💡 "Quick Rebind" changes local client source port to reset DPI filter. "Force Hunt" rotates both local source port and remote destination port.</span>
         </div>
-      </div>
+      </section>
 
-      <div class="terminal-container" id="terminal">
-        <div class="terminal-body" id="logContainer">
-          <!-- Live logs injected here -->
+      <!-- Mini Log Stream Preview in Dashboard -->
+      <section class="dashboard-logs">
+        <div class="section-header">
+          <h3>Recent Activity</h3>
+          <span id="streamStatusMini" class="stream-indicator">● Connecting...</span>
         </div>
-      </div>
-    </section>
+        <div class="terminal-body mini-terminal" id="miniLogContainer"></div>
+      </section>
+    </main>
+
+    <!-- TAB 2: SETTINGS -->
+    <main id="tab-settings" class="tab-content">
+      <section class="settings-container card">
+        <div class="card-title">Auto-WG Configuration</div>
+        <p class="section-desc">Manage WireGuard interface, iptables port forwarding, and autonomous hunting parameters. Settings are saved to <code>config.yaml</code> and applied dynamically.</p>
+
+        <form id="settingsForm" class="settings-form">
+          <!-- WireGuard Settings -->
+          <div class="form-fieldset">
+            <h4>WireGuard Interface</h4>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="cfgInterface">Interface Name</label>
+                <input type="text" id="cfgInterface" name="wireguard.interface" placeholder="wg0" required>
+                <small>The WireGuard interface name (e.g., wg0).</small>
+              </div>
+              <div class="form-group">
+                <label for="cfgMode">Control Mode</label>
+                <select id="cfgMode" name="wireguard.mode">
+                  <option value="wgctrl">wgctrl (Native Netlink / UAPI)</option>
+                  <option value="cli">CLI Executable</option>
+                </select>
+                <small>Use wgctrl for high performance; CLI for fallback.</small>
+              </div>
+              <div class="form-group">
+                <label for="cfgCommand">CLI Command</label>
+                <select id="cfgCommand" name="wireguard.command">
+                  <option value="wg">wg (Standard WireGuard)</option>
+                  <option value="awg">awg (AmneziaWG Obfuscated)</option>
+                </select>
+                <small>Select "awg" if using AmneziaWG obfuscated protocol.</small>
+              </div>
+            </div>
+            <div class="notice-box">
+              ℹ️ <strong>Auto-Discovery:</strong> Peer Public Key and Remote Target IP are automatically discovered from <code>wg0</code>. You do not need to configure them manually.
+            </div>
+          </div>
+
+          <!-- Iptables Settings -->
+          <div class="form-fieldset">
+            <h4>iptables Port Range Forwarding</h4>
+            <div class="form-row">
+              <div class="form-group checkbox-group">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="cfgIptablesEnabled" name="iptables.enabled">
+                  <span>Enable automatic iptables NAT forwarding (Linux)</span>
+                </label>
+                <small>Automatically applies <code>iptables -t nat -A PREROUTING -p udp --dport &lt;range&gt; -j REDIRECT --to-ports &lt;listen_port&gt;</code>.</small>
+              </div>
+              <div class="form-group">
+                <label for="cfgLocalPortRange">Local Port Forwarding Range</label>
+                <input type="text" id="cfgLocalPortRange" name="iptables.port_range" placeholder="20000-30000" required>
+                <small>The port range forwarded to your WireGuard listen port.</small>
+              </div>
+            </div>
+          </div>
+
+          <!-- Hunter Settings -->
+          <div class="form-fieldset">
+            <h4>Autonomous Hunting & Failure Recovery</h4>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="cfgRemotePortRange">Remote Peer's Port Range</label>
+                <input type="text" id="cfgRemotePortRange" name="hunter.remote_port_range" placeholder="20000-30000" required>
+                <small>The forwarded port range of the remote peer.</small>
+              </div>
+              <div class="form-group">
+                <label for="cfgHandshakeTimeout">Handshake Timeout</label>
+                <input type="text" id="cfgHandshakeTimeout" name="hunter.handshake_timeout" placeholder="15s" required>
+                <small>Trigger port rotation if no handshake within this time (e.g. 15s).</small>
+              </div>
+              <div class="form-group">
+                <label for="cfgCheckInterval">Check Interval</label>
+                <input type="text" id="cfgCheckInterval" name="hunter.check_interval" placeholder="3s" required>
+                <small>How often the daemon polls interface health (e.g. 3s).</small>
+              </div>
+              <div class="form-group">
+                <label for="cfgCycleTimeout">Stagger Cycle Duration</label>
+                <input type="text" id="cfgCycleTimeout" name="hunter.cycle_timeout" placeholder="8s" required>
+                <small>Alternation window between peers to avoid race collisions (e.g. 8s).</small>
+              </div>
+            </div>
+          </div>
+
+          <!-- Web Panel Settings -->
+          <div class="form-fieldset">
+            <h4>Web Dashboard</h4>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="cfgWebListen">Listen Address</label>
+                <input type="text" id="cfgWebListen" name="web.listen_addr" placeholder="0.0.0.0:8080" required>
+              </div>
+              <div class="form-group">
+                <label for="cfgWebUsername">Username (Optional)</label>
+                <input type="text" id="cfgWebUsername" name="web.username" placeholder="admin">
+              </div>
+              <div class="form-group">
+                <label for="cfgWebPassword">Password (Optional)</label>
+                <input type="password" id="cfgWebPassword" name="web.password" placeholder="••••••••">
+              </div>
+            </div>
+          </div>
+
+          <!-- Submit Button -->
+          <div class="form-actions">
+            <button type="submit" id="btnSaveSettings" class="btn btn-primary">
+              💾 Save & Apply Settings
+            </button>
+            <span id="saveStatus" class="save-status"></span>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <!-- TAB 3: LIVE LOGS -->
+    <main id="tab-logs" class="tab-content">
+      <section class="logs-section">
+        <div class="logs-header">
+          <div class="logs-title-group">
+            <h2>Detailed Live Logs</h2>
+            <span id="streamStatus" class="stream-indicator">● Connecting stream...</span>
+          </div>
+          <div class="logs-controls">
+            <select id="filterLevel" class="control-input">
+              <option value="ALL">All Levels</option>
+              <option value="INFO">INFO & Above</option>
+              <option value="WARN">WARN & ERROR</option>
+              <option value="ERROR">ERROR Only</option>
+            </select>
+            <select id="filterComponent" class="control-input">
+              <option value="ALL">All Components</option>
+              <option value="HUNTER">Hunter</option>
+              <option value="WG">WireGuard (WG)</option>
+              <option value="IPTABLES">iptables</option>
+              <option value="WEB">Web</option>
+            </select>
+            <input type="text" id="filterSearch" class="control-input" placeholder="Search logs...">
+            <button id="btnAutoScroll" class="btn btn-sm btn-active">Auto-scroll: ON</button>
+            <button id="btnClearLogs" class="btn btn-sm">Clear</button>
+          </div>
+        </div>
+
+        <div class="terminal-container" id="terminal">
+          <div class="terminal-body" id="logContainer"></div>
+        </div>
+      </section>
+    </main>
   </div>
 
   <script src="app.js"></script>
