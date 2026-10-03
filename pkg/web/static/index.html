@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Auto-WG | Dynamic WireGuard Port Negotiator</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="logo-group">
+        <div class="logo-icon">⚡</div>
+        <div>
+          <h1>Auto-WG</h1>
+          <p class="subtitle">Dynamic WireGuard Port Negotiator & DPI Bypass</p>
+        </div>
+      </div>
+      <div class="header-meta">
+        <div class="peer-badge">Local: <span id="localPeerId" class="highlight">-</span></div>
+        <div class="peer-badge">Remote: <span id="remotePeerId" class="highlight">-</span></div>
+        <div class="time-badge" id="serverClock">--:--:--</div>
+      </div>
+    </header>
+
+    <!-- Top Telemetry Cards -->
+    <section class="telemetry-grid">
+      <!-- Card 1: Tunnel Status -->
+      <div class="card status-card">
+        <div class="card-title">Tunnel Health</div>
+        <div class="status-indicator-box">
+          <div id="tunnelStateBadge" class="status-pill status-unknown">CONNECTING</div>
+          <div class="status-reason" id="statusReason">Checking interface...</div>
+        </div>
+        <div class="meta-row">
+          <span>Interface:</span>
+          <strong id="wgInterface">-</strong>
+        </div>
+        <div class="meta-row">
+          <span>Last Handshake:</span>
+          <strong id="lastHandshake">-</strong>
+        </div>
+      </div>
+
+      <!-- Card 2: 5-Tuple & Traffic -->
+      <div class="card">
+        <div class="card-title">Network 5-Tuple & Flow</div>
+        <div class="flow-display">
+          <div class="flow-box">
+            <span class="flow-label">Local ListenPort</span>
+            <span class="flow-value" id="localPort">-</span>
+          </div>
+          <div class="flow-arrow">⇄</div>
+          <div class="flow-box">
+            <span class="flow-label">Remote Endpoint</span>
+            <span class="flow-value" id="remoteEndpoint">-</span>
+          </div>
+        </div>
+        <div class="meta-row">
+          <span>Transfer (Rx / Tx):</span>
+          <strong id="transferStats">0 B / 0 B</strong>
+        </div>
+        <div class="meta-row">
+          <span>Candidate Pool:</span>
+          <span class="port-chips" id="candidateChips">Loading...</span>
+        </div>
+      </div>
+
+      <!-- Card 3: Signaling Channels -->
+      <div class="card">
+        <div class="card-title">Signaling Channels (Redundancy)</div>
+        <div class="signaling-list" id="signalingList">
+          <div class="signaling-item">Loading backends...</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Control Actions -->
+    <section class="actions-bar">
+      <div class="action-buttons">
+        <button id="btnRebind" class="btn btn-secondary">
+          ⚡ Quick Local Port Rebind
+        </button>
+        <button id="btnRenegotiate" class="btn btn-primary">
+          🔄 Force Full Port Negotiation
+        </button>
+      </div>
+      <div class="action-hint">
+        <span>💡 Tip: "Quick Rebind" changes client port to reset DPI 5-tuple state. "Full Negotiation" coordinates probe scan with peer.</span>
+      </div>
+    </section>
+
+    <!-- Live Logs Section -->
+    <section class="logs-section">
+      <div class="logs-header">
+        <div class="logs-title-group">
+          <h2>Detailed Live Logs</h2>
+          <span id="streamStatus" class="stream-indicator">● Connecting stream...</span>
+        </div>
+        <div class="logs-controls">
+          <select id="filterLevel" class="control-input">
+            <option value="ALL">All Levels</option>
+            <option value="INFO">INFO & Above</option>
+            <option value="WARN">WARN & ERROR</option>
+            <option value="ERROR">ERROR Only</option>
+          </select>
+          <select id="filterComponent" class="control-input">
+            <option value="ALL">All Components</option>
+            <option value="WG">WireGuard (WG)</option>
+            <option value="MONITOR">Monitor</option>
+            <option value="ENGINE">Engine</option>
+            <option value="PROBER">Prober</option>
+            <option value="SIGNAL">Signaling</option>
+          </select>
+          <input type="text" id="filterSearch" class="control-input" placeholder="Search logs...">
+          <button id="btnAutoScroll" class="btn btn-sm btn-active">Auto-scroll: ON</button>
+          <button id="btnClearLogs" class="btn btn-sm">Clear</button>
+        </div>
+      </div>
+
+      <div class="terminal-container" id="terminal">
+        <div class="terminal-body" id="logContainer">
+          <!-- Live logs injected here -->
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

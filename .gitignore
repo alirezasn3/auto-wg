@@ -1,0 +1,13 @@
+# Binaries
+autowg
+relay
+*.exe
+*.test
+
+# Configs with secrets
+config.yaml
+
+# IDE
+.idea/
+.vscode/
+*.swp

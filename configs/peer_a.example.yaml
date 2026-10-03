@@ -1,0 +1,78 @@
+# ==============================================================================
+# Auto-WG Peer A Configuration (e.g. VPS / Server or Peer A)
+# ==============================================================================
+
+peer_id: "peer-a"
+remote_peer_id: "peer-b"
+
+wireguard:
+  # The local WireGuard interface name
+  interface: "wg0"
+
+  # The Base64 public key of the remote peer (peer-b)
+  peer_public_key: "PEER_B_WIREGUARD_PUBLIC_KEY_BASE64="
+
+  # Remote host address (Domain or Public IP, without port)
+  remote_host: "peer-b.example.com"
+
+  # Operation mode: "wgctrl" (native Linux netlink) or "cli" / "awg" (AmneziaWG)
+  mode: "wgctrl"
+  command: "wg"
+
+signaling:
+  # Shared secret token for authenticating state updates and probes
+  secret_token: "ChangeMeToASecureRandomString32Chars"
+  timeout: 5s
+
+  # 1. Cloudflare Worker (Serverless REST/KV - recommended primary)
+  cloudflare:
+    enabled: true
+    url: "https://auto-wg-signaling.YOUR_NAME.workers.dev"
+
+  # 2. VPS Relay (Fallback external lightweight relay)
+  vps_relay:
+    enabled: false
+    url: "http://relay.example.com:8443"
+
+  # 3. Direct Peer-to-Peer (Fallback direct signaling over HTTP/TCP)
+  direct:
+    enabled: false
+    listen_addr: ":9443"
+    remote_addr: "peer-b.example.com:9443"
+
+monitor:
+  check_interval: 3s
+  handshake_timeout: 150s
+
+  # Active in-tunnel ping for sub-10-second failure detection
+  tunnel_ping:
+    enabled: true
+    target_ip: "10.0.0.2" # WireGuard internal IP of peer-b
+    target_port: 51820
+    interval: 2s
+    failure_threshold: 4
+
+negotiation:
+  # Candidate port pool to probe and rotate across
+  candidate_ports:
+    - "53"
+    - "80"
+    - "123"
+    - "443"
+    - "853"
+    - "500"
+    - "4500"
+    - "51820"
+    - "20000-20030"
+
+  # If true, first try rotating local client ListenPort to break DPI 5-tuple filter
+  quick_rebind_first: true
+  quick_rebind_timeout: 8s
+  probe_timeout: 12s
+
+web:
+  enabled: true
+  listen_addr: "0.0.0.0:8080"
+  # Optional Basic Auth:
+  # username: "admin"
+  # password: "password123"
