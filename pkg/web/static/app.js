@@ -263,7 +263,12 @@ class AutoWGApp {
 
     // Flow
     this.localPort.textContent = data.local_port > 0 ? `:${data.local_port}` : '-';
-    this.remoteEndpoint.textContent = (data.target_ip && data.remote_port) ? `${data.target_ip}:${data.remote_port}` : '-';
+    if (data.target_ip && data.remote_port) {
+      const isIPv6 = data.target_ip.includes(':');
+      this.remoteEndpoint.textContent = isIPv6 ? `[${data.target_ip}]:${data.remote_port}` : `${data.target_ip}:${data.remote_port}`;
+    } else {
+      this.remoteEndpoint.textContent = '-';
+    }
 
     // Transfer
     this.transferStats.textContent = `${formatBytes(data.receive_bytes)} / ${formatBytes(data.transmit_bytes)}`;

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -162,7 +164,7 @@ func (h *Hunter) tick() {
 	h.localPubKey = dev.PublicKey
 	h.peerPubKey = dev.PeerPublicKey
 	if dev.PeerEndpointIP != "" {
-		h.targetIP = dev.PeerEndpointIP
+		h.targetIP = strings.Trim(dev.PeerEndpointIP, "[]")
 	}
 	h.localPort = dev.ListenPort
 	h.remotePort = dev.PeerPort
@@ -194,9 +196,10 @@ func (h *Hunter) tick() {
 
 	if !isStalled {
 		if h.state == StateHunting || h.state == StateStalled {
+			remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
 			h.log.Info("HUNTER", "===============================================================")
-			h.log.Info("HUNTER", " WIREGUARD CONNECTED! Working 5-tuple: :%d -> %s:%d (Handshake: %v ago)",
-				h.localPort, h.targetIP, h.remotePort, dev.HandshakeAge.Round(time.Millisecond))
+			h.log.Info("HUNTER", " WIREGUARD CONNECTED! Working 5-tuple: :%d -> %s (Handshake: %v ago)",
+				h.localPort, remoteEndpointStr, dev.HandshakeAge.Round(time.Millisecond))
 			h.log.Info("HUNTER", "===============================================================")
 			h.successfulHunts++
 			h.currentAttempt = 0
@@ -274,8 +277,9 @@ func (h *Hunter) executeHunt(reason string) {
 		return
 	}
 
-	h.log.Info("HUNTER", "[Hunt #%d] Rotating 5-tuple: local :%d -> remote %s:%d (Reason: %s)",
-		attempt, newLocalPort, targetIP, newRemotePort, reason)
+	newEndpoint := net.JoinHostPort(targetIP, strconv.Itoa(newRemotePort))
+	h.log.Info("HUNTER", "[Hunt #%d] Rotating 5-tuple: local :%d -> remote %s (Reason: %s)",
+		attempt, newLocalPort, newEndpoint, reason)
 
 	// 1. Update local WireGuard ListenPort (busting client source-port DPI filter)
 	if err := h.wgCtrl.UpdateListenPort(iface, newLocalPort); err != nil {
@@ -283,7 +287,6 @@ func (h *Hunter) executeHunt(reason string) {
 	}
 
 	// 2. Update remote peer Endpoint (destination port in peer's forwarded range)
-	newEndpoint := fmt.Sprintf("%s:%d", targetIP, newRemotePort)
 	if err := h.wgCtrl.UpdatePeerEndpoint(iface, peerKey, newEndpoint); err != nil {
 		h.log.Warn("HUNTER", "Failed to update peer endpoint to %s: %v", newEndpoint, err)
 	}
@@ -301,7 +304,8 @@ func (h *Hunter) triggerPacketBurst(targetIP string, remotePort int) {
 	if pingEnabled && pingTarget != "" {
 		// Send small UDP ping through the tunnel to force immediate packet queuing
 		go func() {
-			conn, err := net.DialTimeout("udp", fmt.Sprintf("%s:51820", pingTarget), 500*time.Millisecond)
+			pingAddr := net.JoinHostPort(strings.Trim(pingTarget, "[]"), "51820")
+			conn, err := net.DialTimeout("udp", pingAddr, 500*time.Millisecond)
 			if err == nil {
 				_, _ = conn.Write([]byte("wg-ping"))
 				_ = conn.Close()

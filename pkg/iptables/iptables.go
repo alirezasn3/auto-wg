@@ -12,18 +12,21 @@ import (
 )
 
 type Manager struct {
-	ipt        *goiptables.IPTables
+	ipt4       *goiptables.IPTables
+	ipt6       *goiptables.IPTables
 	log        *logger.Logger
 	mu         sync.Mutex
 	activeRule []string
 	isLinux    bool
 }
 
-// NewManager initializes the iptables manager.
+// NewManager initializes the iptables and ip6tables managers.
 func NewManager(log *logger.Logger) *Manager {
-	ipt, err := goiptables.NewWithProtocol(goiptables.ProtocolIPv4)
-	if err != nil {
-		log.Warn("IPTABLES", "iptables is not available on this system (%v). Port forwarding rules must be set manually if running outside Linux.", err)
+	ipt4, err4 := goiptables.NewWithProtocol(goiptables.ProtocolIPv4)
+	ipt6, err6 := goiptables.NewWithProtocol(goiptables.ProtocolIPv6)
+
+	if err4 != nil && err6 != nil {
+		log.Warn("IPTABLES", "iptables/ip6tables is not available on this system (%v). Port forwarding rules must be set manually if running outside Linux.", err4)
 		return &Manager{
 			log:     log,
 			isLinux: false,
@@ -31,7 +34,8 @@ func NewManager(log *logger.Logger) *Manager {
 	}
 
 	return &Manager{
-		ipt:     ipt,
+		ipt4:    ipt4,
+		ipt6:    ipt6,
 		log:     log,
 		isLinux: true,
 	}
@@ -62,13 +66,13 @@ func FormatIptablesPortRange(spec string) (string, error) {
 	return fmt.Sprintf("%d:%d", start, end), nil
 }
 
-// ApplyForwardingRule installs the NAT PREROUTING REDIRECT rule:
-// iptables -t nat -A PREROUTING -p udp --dport <start>:<end> -j REDIRECT --to-ports <targetPort>
+// ApplyForwardingRule installs the NAT PREROUTING REDIRECT rule for IPv4 and IPv6:
+// iptables/ip6tables -t nat -A PREROUTING -p udp --dport <start>:<end> -j REDIRECT --to-ports <targetPort>
 func (m *Manager) ApplyForwardingRule(portRangeSpec string, targetPort int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if !m.isLinux || m.ipt == nil {
+	if !m.isLinux {
 		m.log.Warn("IPTABLES", "Skipping iptables configuration (non-Linux or iptables binary missing)")
 		return nil
 	}
@@ -85,44 +89,62 @@ func (m *Manager) ApplyForwardingRule(portRangeSpec string, targetPort int) erro
 		"--to-ports", strconv.Itoa(targetPort),
 	}
 
-	// Remove any previous rule if changed
-	if len(m.activeRule) > 0 && !sliceEqual(m.activeRule, ruleSpec) {
-		_ = m.ipt.DeleteIfExists("nat", "PREROUTING", m.activeRule...)
+	// 1. IPv4 (iptables)
+	if m.ipt4 != nil {
+		if len(m.activeRule) > 0 && !sliceEqual(m.activeRule, ruleSpec) {
+			_ = m.ipt4.DeleteIfExists("nat", "PREROUTING", m.activeRule...)
+		}
+		exists, err := m.ipt4.Exists("nat", "PREROUTING", ruleSpec...)
+		if err == nil && !exists {
+			if err := m.ipt4.AppendUnique("nat", "PREROUTING", ruleSpec...); err != nil {
+				m.log.Warn("IPTABLES", "Failed to append IPv4 rule: %v", err)
+			} else {
+				m.log.Info("IPTABLES", "Applied IPv4 NAT REDIRECT: UDP dport %s -> WireGuard port %d", dport, targetPort)
+			}
+		} else if exists {
+			m.log.Info("IPTABLES", "IPv4 forwarding rule already active: UDP %s -> WireGuard port %d", dport, targetPort)
+		}
 	}
 
-	exists, err := m.ipt.Exists("nat", "PREROUTING", ruleSpec...)
-	if err != nil {
-		return fmt.Errorf("check iptables rule exists: %w", err)
-	}
-
-	if exists {
-		m.log.Info("IPTABLES", "Forwarding rule already active: UDP %s -> WireGuard port %d", dport, targetPort)
-		m.activeRule = ruleSpec
-		return nil
-	}
-
-	if err := m.ipt.AppendUnique("nat", "PREROUTING", ruleSpec...); err != nil {
-		return fmt.Errorf("append iptables rule: %w", err)
+	// 2. IPv6 (ip6tables)
+	if m.ipt6 != nil {
+		if len(m.activeRule) > 0 && !sliceEqual(m.activeRule, ruleSpec) {
+			_ = m.ipt6.DeleteIfExists("nat", "PREROUTING", m.activeRule...)
+		}
+		exists, err := m.ipt6.Exists("nat", "PREROUTING", ruleSpec...)
+		if err == nil && !exists {
+			if err := m.ipt6.AppendUnique("nat", "PREROUTING", ruleSpec...); err != nil {
+				m.log.Warn("IPTABLES", "Failed to append IPv6 rule (ip6tables nat might not be supported in kernel): %v", err)
+			} else {
+				m.log.Info("IPTABLES", "Applied IPv6 NAT REDIRECT: UDP dport %s -> WireGuard port %d", dport, targetPort)
+			}
+		} else if exists {
+			m.log.Info("IPTABLES", "IPv6 forwarding rule already active: UDP %s -> WireGuard port %d", dport, targetPort)
+		}
 	}
 
 	m.activeRule = ruleSpec
-	m.log.Info("IPTABLES", "Applied NAT REDIRECT rule: UDP dport %s -> WireGuard port %d", dport, targetPort)
 	return nil
 }
 
-// RemoveRule deletes the active forwarding rule.
+// RemoveRule deletes the active forwarding rule from both IPv4 and IPv6.
 func (m *Manager) RemoveRule() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if !m.isLinux || m.ipt == nil || len(m.activeRule) == 0 {
+	if !m.isLinux || len(m.activeRule) == 0 {
 		return nil
 	}
 
-	m.log.Info("IPTABLES", "Removing active NAT forwarding rule: %v", m.activeRule)
-	err := m.ipt.DeleteIfExists("nat", "PREROUTING", m.activeRule...)
+	m.log.Info("IPTABLES", "Removing active NAT forwarding rules: %v", m.activeRule)
+	if m.ipt4 != nil {
+		_ = m.ipt4.DeleteIfExists("nat", "PREROUTING", m.activeRule...)
+	}
+	if m.ipt6 != nil {
+		_ = m.ipt6.DeleteIfExists("nat", "PREROUTING", m.activeRule...)
+	}
 	m.activeRule = nil
-	return err
+	return nil
 }
 
 func sliceEqual(a, b []string) bool {

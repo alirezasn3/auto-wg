@@ -197,8 +197,27 @@ func (c *Controller) updateListenPortCLI(ifaceName string, port int) error {
 	return nil
 }
 
+// NormalizeEndpoint ensures IPv6 endpoints have enclosing brackets [ipv6]:port.
+func NormalizeEndpoint(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return endpoint
+	}
+	// If it contains multiple colons and no brackets, it's an unbracketed IPv6:port
+	if strings.Count(endpoint, ":") > 1 && !strings.Contains(endpoint, "[") {
+		lastColon := strings.LastIndex(endpoint, ":")
+		if lastColon != -1 {
+			host := endpoint[:lastColon]
+			port := endpoint[lastColon+1:]
+			return net.JoinHostPort(host, port)
+		}
+	}
+	return endpoint
+}
+
 // UpdatePeerEndpoint updates the remote endpoint of the target peer.
 func (c *Controller) UpdatePeerEndpoint(ifaceName, peerPubKey, endpoint string) error {
+	endpoint = NormalizeEndpoint(endpoint)
 	c.log.Info("WG", "Updating peer %s endpoint on %s to %s", peerPubKey, ifaceName, endpoint)
 
 	if c.mode == "wgctrl" && c.client != nil {
