@@ -286,7 +286,17 @@ func (h *Hunter) executeHunt(reason string) {
 		h.log.Warn("HUNTER", "Failed to update local listen port: %v", err)
 	}
 
-	// 2. Update remote peer Endpoint (destination port in peer's forwarded range)
+	// 2. Synchronize iptables/ip6tables REDIRECT to the new ListenPort
+	h.mu.RLock()
+	iptEnabled := h.cfg.Iptables.Enabled
+	h.mu.RUnlock()
+	if iptEnabled {
+		if err := h.iptMgr.ApplyForwardingRule(localRange, newLocalPort); err != nil {
+			h.log.Warn("HUNTER", "Failed to sync iptables rule to port %d: %v", newLocalPort, err)
+		}
+	}
+
+	// 3. Update remote peer Endpoint (destination port in peer's forwarded range)
 	if err := h.wgCtrl.UpdatePeerEndpoint(iface, peerKey, newEndpoint); err != nil {
 		h.log.Warn("HUNTER", "Failed to update peer endpoint to %s: %v", newEndpoint, err)
 	}
@@ -338,6 +348,15 @@ func (h *Hunter) TriggerRebind() {
 	h.log.Info("HUNTER", "Manual rebind: setting local ListenPort to %d", newPort)
 	if err := h.wgCtrl.UpdateListenPort(iface, newPort); err != nil {
 		h.log.Error("HUNTER", "UpdateListenPort failed: %v", err)
+	}
+
+	h.mu.RLock()
+	iptEnabled := h.cfg.Iptables.Enabled
+	h.mu.RUnlock()
+	if iptEnabled {
+		if err := h.iptMgr.ApplyForwardingRule(localRange, newPort); err != nil {
+			h.log.Warn("HUNTER", "Failed to sync iptables rule to port %d: %v", newPort, err)
+		}
 	}
 }
 
