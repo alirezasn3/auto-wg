@@ -1,6 +1,6 @@
 # Binaries
-autowg
-relay
+/autowg
+/relay
 *.exe
 *.test
 
