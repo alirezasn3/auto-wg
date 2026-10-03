@@ -34,6 +34,7 @@ class AutoWGApp {
     this.targetIP = document.getElementById('targetIP');
     this.peerPubKey = document.getElementById('peerPubKey');
     this.localPubKey = document.getElementById('localPubKey');
+    this.pingStatus = document.getElementById('pingStatus');
     this.iptablesBadge = document.getElementById('iptablesStatusBadge');
     this.huntStats = document.getElementById('huntStats');
 
@@ -135,9 +136,11 @@ class AutoWGApp {
       document.getElementById('cfgLocalPortRange').value = cfg.iptables?.port_range || '20000-30000';
 
       document.getElementById('cfgRemotePortRange').value = cfg.hunter?.remote_port_range || '20000-30000';
-      document.getElementById('cfgHandshakeTimeout').value = formatDuration(cfg.hunter?.handshake_timeout) || '15s';
+      document.getElementById('cfgHandshakeTimeout').value = formatDuration(cfg.hunter?.handshake_timeout) || '60s';
       document.getElementById('cfgCheckInterval').value = formatDuration(cfg.hunter?.check_interval) || '3s';
       document.getElementById('cfgCycleTimeout').value = formatDuration(cfg.hunter?.cycle_timeout) || '8s';
+      document.getElementById('cfgTunnelPingTarget').value = cfg.hunter?.tunnel_ping?.target_ip || '';
+      document.getElementById('cfgPingThreshold').value = cfg.hunter?.tunnel_ping?.failure_threshold || 3;
 
       document.getElementById('cfgWebListen').value = cfg.web?.listen_addr || '0.0.0.0:8080';
       document.getElementById('cfgWebUsername').value = cfg.web?.username || '';
@@ -172,7 +175,9 @@ class AutoWGApp {
           check_interval: parseDuration(document.getElementById('cfgCheckInterval').value),
           cycle_timeout: parseDuration(document.getElementById('cfgCycleTimeout').value),
           tunnel_ping: {
-            enabled: false
+            enabled: true,
+            target_ip: document.getElementById('cfgTunnelPingTarget').value.trim(),
+            failure_threshold: parseInt(document.getElementById('cfgPingThreshold').value) || 3
           }
         },
         web: {
@@ -280,6 +285,19 @@ class AutoWGApp {
     this.targetIP.textContent = data.target_ip || 'Auto-discovering...';
     this.peerPubKey.textContent = data.peer_public_key || 'Auto-discovering...';
     this.localPubKey.textContent = data.local_public_key || '-';
+
+    // In-tunnel Ping Status
+    if (this.pingStatus) {
+      if (data.in_tunnel_ping_target) {
+        if (data.failed_pings > 0) {
+          this.pingStatus.textContent = `${data.in_tunnel_ping_target} (Retrying ${data.failed_pings})`;
+        } else {
+          this.pingStatus.textContent = `${data.in_tunnel_ping_target} (Verified OK)`;
+        }
+      } else {
+        this.pingStatus.textContent = 'Auto-detecting...';
+      }
+    }
 
     // iptables Status
     if (data.iptables_active) {

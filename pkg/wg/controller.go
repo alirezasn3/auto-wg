@@ -23,6 +23,7 @@ type DeviceInfo struct {
 	PeerEndpoint   string
 	PeerEndpointIP string
 	PeerPort       int
+	PeerAllowedIPs []string
 	LastHandshake  time.Time
 	HandshakeAge   time.Duration
 	TransmitBytes  int64
@@ -99,6 +100,9 @@ func (c *Controller) GetDeviceInfo(ifaceName, targetPeerPubkey string) (*DeviceI
 				}
 				info.TransmitBytes = p.TransmitBytes
 				info.ReceiveBytes = p.ReceiveBytes
+				for _, ipNet := range p.AllowedIPs {
+					info.PeerAllowedIPs = append(info.PeerAllowedIPs, ipNet.IP.String())
+				}
 				break
 			}
 		}
@@ -152,6 +156,19 @@ func (c *Controller) getDeviceInfoCLI(ifaceName, targetPeerPubkey string) (*Devi
 						info.PeerEndpointIP = host
 						p, _ := strconv.Atoi(portStr)
 						info.PeerPort = p
+					}
+				}
+				if fields[3] != "(none)" && fields[3] != "" {
+					for _, aip := range strings.Split(fields[3], ",") {
+						aip = strings.TrimSpace(aip)
+						if aip != "" {
+							ip, _, err := net.ParseCIDR(aip)
+							if err == nil {
+								info.PeerAllowedIPs = append(info.PeerAllowedIPs, ip.String())
+							} else {
+								info.PeerAllowedIPs = append(info.PeerAllowedIPs, aip)
+							}
+						}
 					}
 				}
 				hsUnix, _ := strconv.ParseInt(fields[4], 10, 64)

@@ -39,9 +39,11 @@ type HunterConfig struct {
 }
 
 type TunnelPingConfig struct {
-	Enabled  bool          `yaml:"enabled"`   // Optional active in-tunnel ICMP ping
-	TargetIP string        `yaml:"target_ip"` // In-tunnel IP of the peer (e.g. "10.0.0.1")
-	Interval time.Duration `yaml:"interval"`  // Ping interval (default: 2s)
+	Enabled          bool          `yaml:"enabled"`           // Active in-tunnel ICMP ping
+	TargetIP         string        `yaml:"target_ip"`         // In-tunnel IP of the peer (e.g. "10.0.0.1", auto-detected if empty)
+	Interval         time.Duration `yaml:"interval"`          // Ping interval (default: 2s)
+	Timeout          time.Duration `yaml:"timeout"`           // Single ping timeout (default: 2s)
+	FailureThreshold int           `yaml:"failure_threshold"` // Consecutive failed pings before hunt (default: 3)
 }
 
 type WebConfig struct {
@@ -59,6 +61,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	cfg := &Config{}
+	// Default TunnelPing to enabled before unmarshaling so it's on by default
+	cfg.Hunter.TunnelPing.Enabled = true
+
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config yaml: %w", err)
 	}
@@ -104,13 +109,19 @@ func SetDefaults(cfg *Config) {
 		cfg.Hunter.CheckInterval = 3 * time.Second
 	}
 	if cfg.Hunter.HandshakeTimeout == 0 {
-		cfg.Hunter.HandshakeTimeout = 15 * time.Second
+		cfg.Hunter.HandshakeTimeout = 60 * time.Second
 	}
 	if cfg.Hunter.CycleTimeout == 0 {
 		cfg.Hunter.CycleTimeout = 8 * time.Second
 	}
 	if cfg.Hunter.TunnelPing.Interval == 0 {
 		cfg.Hunter.TunnelPing.Interval = 2 * time.Second
+	}
+	if cfg.Hunter.TunnelPing.Timeout == 0 {
+		cfg.Hunter.TunnelPing.Timeout = 2 * time.Second
+	}
+	if cfg.Hunter.TunnelPing.FailureThreshold == 0 {
+		cfg.Hunter.TunnelPing.FailureThreshold = 3
 	}
 
 	if cfg.Web.ListenAddr == "" {

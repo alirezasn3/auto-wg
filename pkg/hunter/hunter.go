@@ -13,6 +13,7 @@ import (
 	"auto-wg/pkg/config"
 	"auto-wg/pkg/iptables"
 	"auto-wg/pkg/logger"
+	"auto-wg/pkg/ping"
 	"auto-wg/pkg/wg"
 )
 
@@ -24,27 +25,29 @@ const (
 )
 
 type StatusReport struct {
-	State             string        `json:"state"`
-	Interface         string        `json:"interface"`
-	LocalPublicKey    string        `json:"local_public_key"`
-	PeerPublicKey     string        `json:"peer_public_key"`
-	TargetIP          string        `json:"target_ip"`
-	LocalPort         int           `json:"local_port"`
-	RemotePort        int           `json:"remote_port"`
-	LastHandshake     time.Time     `json:"last_handshake"`
-	HandshakeAge      time.Duration `json:"handshake_age"`
-	HandshakeAgeSec   float64       `json:"handshake_age_seconds"`
-	TransmitBytes     int64         `json:"transmit_bytes"`
-	ReceiveBytes      int64         `json:"receive_bytes"`
-	TotalHunts        int64         `json:"total_hunts"`
-	SuccessfulHunts   int64         `json:"successful_hunts"`
-	CurrentAttempt    int           `json:"current_attempt"`
-	LastHuntTime      time.Time     `json:"last_hunt_time"`
-	LastHuntReason    string        `json:"last_hunt_reason"`
-	IptablesActive    bool          `json:"iptables_active"`
-	LocalPortRange    string        `json:"local_port_range"`
-	RemotePortRange   string        `json:"remote_port_range"`
-	IsPrimary         bool          `json:"is_primary"`
+	State              string        `json:"state"`
+	Interface          string        `json:"interface"`
+	LocalPublicKey     string        `json:"local_public_key"`
+	PeerPublicKey      string        `json:"peer_public_key"`
+	TargetIP           string        `json:"target_ip"`
+	InTunnelPingTarget string        `json:"in_tunnel_ping_target"`
+	LocalPort          int           `json:"local_port"`
+	RemotePort         int           `json:"remote_port"`
+	LastHandshake      time.Time     `json:"last_handshake"`
+	HandshakeAge       time.Duration `json:"handshake_age"`
+	HandshakeAgeSec    float64       `json:"handshake_age_seconds"`
+	TransmitBytes      int64         `json:"transmit_bytes"`
+	ReceiveBytes       int64         `json:"receive_bytes"`
+	TotalHunts         int64         `json:"total_hunts"`
+	SuccessfulHunts    int64         `json:"successful_hunts"`
+	CurrentAttempt     int           `json:"current_attempt"`
+	FailedPings        int           `json:"failed_pings"`
+	LastHuntTime       time.Time     `json:"last_hunt_time"`
+	LastHuntReason     string        `json:"last_hunt_reason"`
+	IptablesActive     bool          `json:"iptables_active"`
+	LocalPortRange     string        `json:"local_port_range"`
+	RemotePortRange    string        `json:"remote_port_range"`
+	IsPrimary          bool          `json:"is_primary"`
 }
 
 type Hunter struct {
@@ -60,12 +63,15 @@ type Hunter struct {
 	localPubKey     string
 	peerPubKey      string
 	targetIP        string
+	pingTarget      string
 	localPort       int
 	remotePort      int
 	lastHandshake   time.Time
 	handshakeAge    time.Duration
 	txBytes         int64
 	rxBytes         int64
+	lastRxBytes     int64
+	failedPings     int
 	totalHunts      int64
 	successfulHunts int64
 	currentAttempt  int
@@ -108,7 +114,7 @@ func (h *Hunter) Start(ctx context.Context) {
 			h.executeHunt(reason)
 
 		case <-ticker.C:
-			h.tick()
+			h.tick(ctx)
 		}
 	}
 }
@@ -144,11 +150,20 @@ func (h *Hunter) applyIptablesRule() {
 	}
 }
 
-func (h *Hunter) tick() {
+func (h *Hunter) tick(ctx context.Context) {
 	h.mu.RLock()
 	iface := h.cfg.WireGuard.Interface
 	timeout := h.cfg.Hunter.HandshakeTimeout
 	cycleTimeout := h.cfg.Hunter.CycleTimeout
+	pingEnabled := h.cfg.Hunter.TunnelPing.Enabled
+	threshold := h.cfg.Hunter.TunnelPing.FailureThreshold
+	if threshold <= 0 {
+		threshold = 3
+	}
+	pingTimeout := h.cfg.Hunter.TunnelPing.Timeout
+	if pingTimeout <= 0 {
+		pingTimeout = 2 * time.Second
+	}
 	h.mu.RUnlock()
 
 	dev, err := h.wgCtrl.GetDeviceInfo(iface, "")
@@ -173,6 +188,17 @@ func (h *Hunter) tick() {
 	h.txBytes = dev.TransmitBytes
 	h.rxBytes = dev.ReceiveBytes
 
+	// 1. Check if traffic is actively arriving
+	rxProgress := dev.ReceiveBytes > h.lastRxBytes && h.lastRxBytes > 0
+	h.lastRxBytes = dev.ReceiveBytes
+
+	// Determine in-tunnel ping target (configured target or auto-detected from PeerAllowedIPs)
+	pingTarget := h.cfg.Hunter.TunnelPing.TargetIP
+	if pingTarget == "" && len(dev.PeerAllowedIPs) > 0 {
+		pingTarget = dev.PeerAllowedIPs[0]
+	}
+	h.pingTarget = pingTarget
+
 	if h.peerPubKey == "" {
 		h.state = StateUnknown
 		h.mu.Unlock()
@@ -182,19 +208,12 @@ func (h *Hunter) tick() {
 
 	isPrimary := dev.PublicKey < dev.PeerPublicKey
 
-	// Determine if tunnel is stalled
-	isStalled := false
-	var stallReason string
+	// 2. Check if tunnel is healthy:
+	// - Handshake was negotiated recently (HandshakeAge <= timeout) AND NOT zero, OR
+	// - Incoming traffic is actively flowing (rxProgress is true)
+	isHandshakeFresh := !dev.LastHandshake.IsZero() && dev.HandshakeAge <= timeout
 
-	if dev.LastHandshake.IsZero() {
-		isStalled = true
-		stallReason = "no_handshake_ever"
-	} else if dev.HandshakeAge > timeout {
-		isStalled = true
-		stallReason = fmt.Sprintf("handshake_expired_%v", dev.HandshakeAge.Round(time.Second))
-	}
-
-	if !isStalled {
+	if isHandshakeFresh || rxProgress {
 		if h.state == StateHunting || h.state == StateStalled {
 			remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
 			h.log.Info("HUNTER", "===============================================================")
@@ -205,19 +224,62 @@ func (h *Hunter) tick() {
 			h.currentAttempt = 0
 		}
 		h.state = StateConnected
+		h.failedPings = 0
 		h.mu.Unlock()
 		return
 	}
 
-	// Tunnel is STALLED!
+	// 3. Handshake is stale or zero, and no incoming RX packets.
+	// Before deciding to hunt: verify if the peer responds to in-tunnel ping!
+	if pingEnabled && pingTarget != "" {
+		h.mu.Unlock()
+		pingOK := ping.Ping(ctx, pingTarget, pingTimeout)
+		h.mu.Lock()
+
+		if pingOK {
+			h.log.Debug("HUNTER", "Handshake stale (%v) but in-tunnel ping to %s succeeded; link is alive",
+				dev.HandshakeAge.Round(time.Second), pingTarget)
+			h.failedPings = 0
+			if h.state == StateHunting || h.state == StateStalled {
+				remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
+				h.log.Info("HUNTER", "===============================================================")
+				h.log.Info("HUNTER", " WIREGUARD CONNECTED! In-tunnel ping to %s verified (5-tuple: :%d -> %s)",
+					pingTarget, h.localPort, remoteEndpointStr)
+				h.log.Info("HUNTER", "===============================================================")
+				h.successfulHunts++
+				h.currentAttempt = 0
+			}
+			h.state = StateConnected
+			h.mu.Unlock()
+			return
+		}
+
+		// In-tunnel ping failed
+		h.failedPings++
+		h.log.Warn("HUNTER", "Tunnel unresponsive: handshake age %v, in-tunnel ping #%d/%d to %s failed",
+			dev.HandshakeAge.Round(time.Second), h.failedPings, threshold, pingTarget)
+
+		if h.failedPings < threshold {
+			// In grace verification period, do not hunt yet!
+			h.state = StateStalled
+			h.lastHuntReason = fmt.Sprintf("verifying_stalled_ping_%d/%d", h.failedPings, threshold)
+			h.mu.Unlock()
+			return
+		}
+	}
+
+	// 4. Link is confirmed dead (failed pings reached threshold, or ping disabled)!
 	h.state = StateHunting
 	attempt := h.currentAttempt
+	stallReason := "handshake_expired"
+	if dev.LastHandshake.IsZero() {
+		stallReason = "no_handshake_ever"
+	} else if h.failedPings >= threshold {
+		stallReason = fmt.Sprintf("pings_failed_%d_times", h.failedPings)
+	}
 	h.mu.Unlock()
 
 	// Role-staggered turn coordination
-	// Cycle 0: Primary peer tries (seconds 0 to CycleTimeout)
-	// Cycle 1: Secondary peer tries
-	// Cycle >= 4: Both try with random jitter
 	nowUnix := time.Now().Unix()
 	cycleSec := int64(cycleTimeout.Seconds())
 	if cycleSec <= 0 {
@@ -414,26 +476,28 @@ func (h *Hunter) GetStatus() StatusReport {
 	}
 
 	return StatusReport{
-		State:             h.state,
-		Interface:         h.cfg.WireGuard.Interface,
-		LocalPublicKey:    h.localPubKey,
-		PeerPublicKey:     h.peerPubKey,
-		TargetIP:          h.targetIP,
-		LocalPort:         h.localPort,
-		RemotePort:        h.remotePort,
-		LastHandshake:     h.lastHandshake,
-		HandshakeAge:      h.handshakeAge,
-		HandshakeAgeSec:   hsAgeSec,
-		TransmitBytes:     h.txBytes,
-		ReceiveBytes:      h.rxBytes,
-		TotalHunts:        h.totalHunts,
-		SuccessfulHunts:   h.successfulHunts,
-		CurrentAttempt:    h.currentAttempt,
-		LastHuntTime:      h.lastHuntTime,
-		LastHuntReason:    h.lastHuntReason,
-		IptablesActive:    h.iptablesActive,
-		LocalPortRange:    h.cfg.Iptables.PortRange,
-		RemotePortRange:   h.cfg.Hunter.RemotePortRange,
-		IsPrimary:         isPrimary,
+		State:              h.state,
+		Interface:          h.cfg.WireGuard.Interface,
+		LocalPublicKey:     h.localPubKey,
+		PeerPublicKey:      h.peerPubKey,
+		TargetIP:           h.targetIP,
+		InTunnelPingTarget: h.pingTarget,
+		LocalPort:          h.localPort,
+		RemotePort:         h.remotePort,
+		LastHandshake:      h.lastHandshake,
+		HandshakeAge:       h.handshakeAge,
+		HandshakeAgeSec:    hsAgeSec,
+		TransmitBytes:      h.txBytes,
+		ReceiveBytes:       h.rxBytes,
+		TotalHunts:         h.totalHunts,
+		SuccessfulHunts:    h.successfulHunts,
+		CurrentAttempt:     h.currentAttempt,
+		FailedPings:        h.failedPings,
+		LastHuntTime:       h.lastHuntTime,
+		LastHuntReason:     h.lastHuntReason,
+		IptablesActive:     h.iptablesActive,
+		LocalPortRange:     h.cfg.Iptables.PortRange,
+		RemotePortRange:    h.cfg.Hunter.RemotePortRange,
+		IsPrimary:          isPrimary,
 	}
 }
