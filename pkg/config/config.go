@@ -40,7 +40,6 @@ type HunterConfig struct {
 
 type TunnelPingConfig struct {
 	Enabled          bool          `yaml:"enabled"`           // Active in-tunnel ICMP ping
-	TargetIP         string        `yaml:"target_ip"`         // In-tunnel IP of the peer (e.g. "10.0.0.1", auto-detected if empty)
 	Interval         time.Duration `yaml:"interval"`          // Ping interval (default: 2s)
 	Timeout          time.Duration `yaml:"timeout"`           // Single ping timeout (default: 2s)
 	FailureThreshold int           `yaml:"failure_threshold"` // Consecutive failed pings before hunt (default: 3)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -15,16 +16,30 @@ import (
 	"auto-wg/pkg/logger"
 	"auto-wg/pkg/web"
 	"auto-wg/pkg/wg"
+
+	goSystemd "github.com/alirezasn3/go-systemd"
 )
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "Path to YAML configuration file")
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
+	installFlag := flag.Bool("install", false, "Install Auto-WG as a systemd service and start it")
+	uninstallFlag := flag.Bool("uninstall", false, "Stop and uninstall the Auto-WG systemd service")
 	flag.Parse()
 
 	log := logger.Default()
 	if *debug {
 		log.SetMinLevel(logger.LevelDebug)
+	}
+
+	if *installFlag {
+		handleInstall(*configPath, log)
+		return
+	}
+
+	if *uninstallFlag {
+		handleUninstall(log)
+		return
 	}
 
 	log.Info("MAIN", "=================================================================")
@@ -98,8 +113,68 @@ func main() {
 		_ = webServer.Stop(shutdownCtx)
 	}
 
-	// Clean up iptables rule on shutdown if desired
+	// Clean up iptables rule on shutdown
 	_ = iptMgr.RemoveRule()
 
 	fmt.Println("Auto-WG stopped cleanly.")
+}
+
+func handleInstall(configPath string, log *logger.Logger) {
+	exePath, err := os.Executable()
+	if err != nil {
+		log.Error("INSTALL", "Failed to determine executable path: %v", err)
+		os.Exit(1)
+	}
+	exePath, err = filepath.EvalSymlinks(exePath)
+	if err != nil {
+		log.Error("INSTALL", "Failed to resolve executable symlinks: %v", err)
+		os.Exit(1)
+	}
+
+	absConfigPath, err := filepath.Abs(configPath)
+	if err != nil {
+		log.Error("INSTALL", "Failed to determine absolute config path: %v", err)
+		os.Exit(1)
+	}
+
+	svc := &goSystemd.Service{
+		Name:        "autowg",
+		Description: "Auto-WG: Autonomous WireGuard Port Negotiator",
+		ExecStart:   fmt.Sprintf("%s -config %s", exePath, absConfigPath),
+		Restart:     "always",
+		RestartSec:  "5s",
+		After:       "network.target",
+		Wants:       "network.target",
+		WantedBy:    "multi-user.target",
+	}
+
+	log.Info("INSTALL", "Creating systemd service 'autowg' pointing to executable %s...", exePath)
+	if err := goSystemd.CreateService(svc); err != nil {
+		log.Error("INSTALL", "Failed to create systemd service: %v", err)
+		os.Exit(1)
+	}
+
+	_ = goSystemd.DaemonReload()
+
+	log.Info("INSTALL", "Starting systemd service 'autowg'...")
+	if err := goSystemd.StartService("autowg"); err != nil {
+		log.Warn("INSTALL", "Service created successfully, but starting failed: %v", err)
+		log.Info("INSTALL", "You can start it manually with: sudo systemctl start autowg")
+	} else {
+		log.Info("INSTALL", "Service 'autowg' installed and started successfully!")
+	}
+}
+
+func handleUninstall(log *logger.Logger) {
+	log.Info("UNINSTALL", "Stopping systemd service 'autowg'...")
+	_ = goSystemd.StopService("autowg")
+
+	log.Info("UNINSTALL", "Deleting systemd unit file for 'autowg'...")
+	if err := goSystemd.DeleteService("autowg"); err != nil {
+		log.Error("UNINSTALL", "Failed to delete systemd service: %v", err)
+		os.Exit(1)
+	}
+
+	_ = goSystemd.DaemonReload()
+	log.Info("UNINSTALL", "Service 'autowg' uninstalled successfully!")
 }

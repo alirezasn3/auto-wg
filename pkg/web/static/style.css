@@ -209,6 +209,20 @@ body {
   font-size: 13px;
   border-bottom: 1px solid rgba(48, 54, 61, 0.5);
   padding-bottom: 6px;
+  gap: 10px;
+}
+
+.meta-row > span:first-child {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.meta-row strong,
+.meta-row .highlight {
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  text-align: right;
+  max-width: 65%;
 }
 
 .meta-row:last-child {
@@ -244,6 +258,9 @@ body {
   border: 1px solid var(--border-color);
   border-radius: 8px;
   padding: 12px;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .flow-box {
@@ -251,24 +268,53 @@ body {
   flex-direction: column;
   align-items: center;
   gap: 4px;
+  min-width: 0;
+  flex: 1;
+  text-align: center;
 }
 
 .flow-label {
   font-size: 11px;
   color: var(--text-muted);
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .flow-value {
-  font-size: 18px;
+  font-size: 16px;
   font-family: var(--font-mono);
   font-weight: 700;
   color: var(--accent);
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+
+.flow-value.endpoint-ipv6 {
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.flow-value .endpoint-ip {
+  display: block;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+.flow-value .endpoint-port {
+  display: inline-block;
+  color: #fff;
+  font-weight: 800;
+  background: rgba(88, 166, 255, 0.2);
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-top: 2px;
 }
 
 .flow-arrow {
   font-size: 20px;
   color: var(--text-muted);
+  flex-shrink: 0;
 }
 
 /* Actions Bar */

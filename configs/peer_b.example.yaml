@@ -31,16 +31,18 @@ hunter:
   # How often to check interface health
   check_interval: 3s
 
-  # If handshake is older than this threshold, consider link stalled and trigger hunting
-  handshake_timeout: 15s
+  # If handshake is older than this threshold, verify with ping before hunting
+  handshake_timeout: 60s
 
   # Stagger window to coordinate turn-taking between peers without race conditions
   cycle_timeout: 8s
 
-  # Optional active in-tunnel UDP ping
+  # Active in-tunnel ICMP ping verification before hunting
+  # Note: Target IP is automatically derived from the peer's AllowedIPs on wg0
   tunnel_ping:
-    enabled: false
-    target_ip: "10.0.0.1"
+    enabled: true
+    interval: 2s
+    failure_threshold: 3
 
 web:
   # Modern web dashboard & configuration settings panel

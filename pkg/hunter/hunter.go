@@ -192,9 +192,9 @@ func (h *Hunter) tick(ctx context.Context) {
 	rxProgress := dev.ReceiveBytes > h.lastRxBytes && h.lastRxBytes > 0
 	h.lastRxBytes = dev.ReceiveBytes
 
-	// Determine in-tunnel ping target (configured target or auto-detected from PeerAllowedIPs)
-	pingTarget := h.cfg.Hunter.TunnelPing.TargetIP
-	if pingTarget == "" && len(dev.PeerAllowedIPs) > 0 {
+	// Determine in-tunnel ping target strictly from peer's AllowedIPs
+	var pingTarget string
+	if len(dev.PeerAllowedIPs) > 0 {
 		pingTarget = dev.PeerAllowedIPs[0]
 	}
 	h.pingTarget = pingTarget
@@ -370,7 +370,7 @@ func (h *Hunter) executeHunt(reason string) {
 func (h *Hunter) triggerPacketBurst(targetIP string, remotePort int) {
 	h.mu.RLock()
 	pingEnabled := h.cfg.Hunter.TunnelPing.Enabled
-	pingTarget := h.cfg.Hunter.TunnelPing.TargetIP
+	pingTarget := h.pingTarget
 	h.mu.RUnlock()
 
 	if pingEnabled && pingTarget != "" {

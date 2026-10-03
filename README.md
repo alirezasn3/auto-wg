@@ -99,9 +99,9 @@ web:
   listen_addr: "0.0.0.0:8080"
 ```
 
-### 3. Run
+### 3. Run or Install as a Service
 
-Run with `sudo` (required for netlink device control and iptables rules):
+Run directly with `sudo` (required for netlink device control, iptables, and ICMP ping):
 
 ```bash
 sudo ./autowg -config config.yaml
@@ -113,10 +113,22 @@ To enable verbose debug logs:
 sudo ./autowg -config config.yaml -debug
 ```
 
+#### One-Command Systemd Installation:
+
+Auto-WG includes built-in systemd service management via `github.com/alirezasn3/go-systemd`:
+
+```bash
+# Install and start as a background systemd service:
+sudo ./autowg --install -config /etc/auto-wg/config.yaml
+
+# Stop and uninstall the systemd service:
+sudo ./autowg --uninstall
+```
+
 ### 4. Access Web Dashboard
 
 Open `http://<your-server-ip>:8080` in your browser:
-* **Dashboard Tab**: View live connection health, handshake age, transfer stats, current 5-tuple ports, and trigger manual port rebinds or hunts.
+* **Dashboard Tab**: View live connection health, handshake age, transfer stats, current 5-tuple ports (with full IPv4/IPv6 support), and trigger manual port rebinds or hunts.
 * **Settings Tab**: Update port ranges, timeout intervals, interface names, or credentials directly from the web browser and apply them live without restarting.
 * **Live Logs Tab**: Real-time terminal streaming logs via Server-Sent Events (SSE).
 
@@ -133,8 +145,10 @@ Open `http://<your-server-ip>:8080` in your browser:
 | `iptables.port_range` | string | `20000-30000` | Local port range forwarded to WireGuard listen port |
 | `hunter.remote_port_range`| string | `20000-30000` | Remote peer's forwarded port range |
 | `hunter.check_interval` | duration| `3s` | How often to poll WireGuard handshake age |
-| `hunter.handshake_timeout`| duration| `15s` | Stale handshake threshold to trigger hunting |
+| `hunter.handshake_timeout`| duration| `60s` | Stale handshake threshold to trigger ping check |
 | `hunter.cycle_timeout` | duration| `8s` | Alternating stagger window to prevent peer collision |
+| `hunter.tunnel_ping.enabled` | bool | `true` | Active ICMP ping verification before hunting |
+| `hunter.tunnel_ping.failure_threshold` | int | `3` | Consecutive ping timeouts before hunting (target IP is auto-derived from peer `AllowedIPs`) |
 | `web.enabled` | bool | `true` | Enable built-in web dashboard |
 | `web.listen_addr` | string | `0.0.0.0:8080`| Web dashboard listen address |
 | `web.username` | string | `""` | Optional HTTP Basic Auth username |
@@ -142,9 +156,21 @@ Open `http://<your-server-ip>:8080` in your browser:
 
 ---
 
-## 🐧 Systemd Service (Recommended for Production)
+## 🐧 Systemd Service
 
-To run Auto-WG as a background daemon managed by systemd:
+Auto-WG can be automatically installed or managed manually:
+
+### Option A: Automatic (`--install` / `--uninstall`)
+
+```bash
+# Installs unit file, reloads systemd, enables and starts autowg
+sudo ./autowg --install -config /path/to/config.yaml
+
+# Stops service and removes unit file
+sudo ./autowg --uninstall
+```
+
+### Option B: Manual Unit File
 
 Create `/etc/systemd/system/autowg.service`:
 

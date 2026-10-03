@@ -214,16 +214,10 @@
                 <label for="cfgCycleTimeout">Stagger Cycle Duration</label>
                 <input type="text" id="cfgCycleTimeout" name="hunter.cycle_timeout" placeholder="8s" required>
                 <small>Alternation window between peers to avoid race collisions (e.g. 8s).</small>
-              </div>
-              <div class="form-group">
-                <label for="cfgTunnelPingTarget">In-Tunnel Ping Target IP</label>
-                <input type="text" id="cfgTunnelPingTarget" name="hunter.tunnel_ping.target_ip" placeholder="Auto-detect from AllowedIPs (e.g. 10.0.0.1)">
-                <small>Peer's internal WireGuard IP. Auto-detected from AllowedIPs if left blank.</small>
-              </div>
               <div class="form-group">
                 <label for="cfgPingThreshold">Ping Failure Threshold</label>
                 <input type="number" id="cfgPingThreshold" name="hunter.tunnel_ping.failure_threshold" placeholder="3" min="1" max="10">
-                <small>Consecutive failed pings before starting port hunt (default: 3).</small>
+                <small>Consecutive failed pings to peer's AllowedIP before starting port hunt (default: 3).</small>
               </div>
             </div>
           </div>

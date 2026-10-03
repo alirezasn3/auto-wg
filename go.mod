@@ -3,6 +3,8 @@ module auto-wg
 go 1.25.0
 
 require (
+	github.com/alirezasn3/go-permissions v1.0.0 // indirect
+	github.com/alirezasn3/go-systemd v1.3.0 // indirect
 	github.com/coreos/go-iptables v0.8.0 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/josharian/native v1.1.0 // indirect

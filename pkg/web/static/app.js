@@ -139,7 +139,6 @@ class AutoWGApp {
       document.getElementById('cfgHandshakeTimeout').value = formatDuration(cfg.hunter?.handshake_timeout) || '60s';
       document.getElementById('cfgCheckInterval').value = formatDuration(cfg.hunter?.check_interval) || '3s';
       document.getElementById('cfgCycleTimeout').value = formatDuration(cfg.hunter?.cycle_timeout) || '8s';
-      document.getElementById('cfgTunnelPingTarget').value = cfg.hunter?.tunnel_ping?.target_ip || '';
       document.getElementById('cfgPingThreshold').value = cfg.hunter?.tunnel_ping?.failure_threshold || 3;
 
       document.getElementById('cfgWebListen').value = cfg.web?.listen_addr || '0.0.0.0:8080';
@@ -176,7 +175,6 @@ class AutoWGApp {
           cycle_timeout: parseDuration(document.getElementById('cfgCycleTimeout').value),
           tunnel_ping: {
             enabled: true,
-            target_ip: document.getElementById('cfgTunnelPingTarget').value.trim(),
             failure_threshold: parseInt(document.getElementById('cfgPingThreshold').value) || 3
           }
         },
@@ -270,9 +268,16 @@ class AutoWGApp {
     this.localPort.textContent = data.local_port > 0 ? `:${data.local_port}` : '-';
     if (data.target_ip && data.remote_port) {
       const isIPv6 = data.target_ip.includes(':');
-      this.remoteEndpoint.textContent = isIPv6 ? `[${data.target_ip}]:${data.remote_port}` : `${data.target_ip}:${data.remote_port}`;
+      if (isIPv6) {
+        this.remoteEndpoint.innerHTML = `<span class="endpoint-ip" title="[${data.target_ip}]:${data.remote_port}">[${data.target_ip}]</span><span class="endpoint-port">:${data.remote_port}</span>`;
+        this.remoteEndpoint.classList.add('endpoint-ipv6');
+      } else {
+        this.remoteEndpoint.textContent = `${data.target_ip}:${data.remote_port}`;
+        this.remoteEndpoint.classList.remove('endpoint-ipv6');
+      }
     } else {
       this.remoteEndpoint.textContent = '-';
+      this.remoteEndpoint.classList.remove('endpoint-ipv6');
     }
 
     // Transfer
@@ -282,7 +287,13 @@ class AutoWGApp {
     this.portRangeSummary.textContent = `Local: ${data.local_port_range || '-'} | Remote: ${data.remote_port_range || '-'}`;
 
     // Target IP & Keys
-    this.targetIP.textContent = data.target_ip || 'Auto-discovering...';
+    if (data.target_ip) {
+      this.targetIP.textContent = data.target_ip;
+      this.targetIP.title = data.target_ip;
+    } else {
+      this.targetIP.textContent = 'Auto-discovering...';
+      this.targetIP.removeAttribute('title');
+    }
     this.peerPubKey.textContent = data.peer_public_key || 'Auto-discovering...';
     this.localPubKey.textContent = data.local_public_key || '-';
 
