@@ -80,6 +80,7 @@
                 <div class="flow-pulse"></div>
               </div>
               <div class="bridge-badge">UDP</div>
+              <div class="bridge-badge bridge-direction" id="flowDirectionBadge">Peer A ⇄ Peer B</div>
             </div>
 
             <div class="bridge-metrics">
@@ -231,6 +232,25 @@
                 <strong id="staggerRoleDetail">Primary</strong>
               </div>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Connection Event History -->
+      <section class="card events-history-card">
+        <div class="section-header">
+          <div class="events-title-group">
+            <h3>Connection History & Flow Direction</h3>
+            <span class="events-count" id="eventsCount">0 events</span>
+          </div>
+          <div class="events-legend">
+            <span class="legend-item"><span class="legend-dot dot-connected"></span> Connected</span>
+            <span class="legend-item"><span class="legend-dot dot-disconnected"></span> Disconnected</span>
+          </div>
+        </div>
+        <div class="events-container">
+          <div class="events-list" id="eventsList">
+            <div class="events-empty">No connection events recorded yet.</div>
           </div>
         </div>
       </section>

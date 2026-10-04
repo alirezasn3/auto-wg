@@ -78,6 +78,11 @@ class AutoWGApp {
     this.btnRebind = document.getElementById('btnRebind');
     this.btnHunt = document.getElementById('btnHunt');
 
+    // Bridge Direction & Events History
+    this.flowDirectionBadge = document.getElementById('flowDirectionBadge');
+    this.eventsList = document.getElementById('eventsList');
+    this.eventsCount = document.getElementById('eventsCount');
+
     // Toast
     this.toast = document.getElementById('toast');
   }
@@ -96,9 +101,23 @@ class AutoWGApp {
         this.switchTab('logs');
       });
     }
+
+    // Auto switch back to dashboard on mobile screens
+    window.addEventListener('resize', () => {
+      if (window.innerWidth <= 768) {
+        const activeTab = document.querySelector('.nav-tab.active');
+        if (activeTab && activeTab.getAttribute('data-tab') === 'logs') {
+          this.switchTab('dashboard');
+        }
+      }
+    });
   }
 
   switchTab(tabId) {
+    if (window.innerWidth <= 768 && tabId === 'logs') {
+      return;
+    }
+
     const tabs = document.querySelectorAll('.nav-tab');
     tabs.forEach(t => {
       if (t.getAttribute('data-tab') === tabId) {
@@ -234,6 +253,9 @@ class AutoWGApp {
       }
     }
     this.renderTimestamps(this.currentData);
+    if (this.currentData && this.currentData.events) {
+      this.renderEvents(this.currentData.events);
+    }
   }
 
   renderTimestamps(data) {
@@ -295,6 +317,17 @@ class AutoWGApp {
     this.updateLiveHandshakeAge();
     if (data.handshake_age_seconds === undefined || data.handshake_age_seconds <= 0) {
       this.lastHandshake.textContent = 'Never / Waiting';
+    }
+
+    if (this.flowDirectionBadge) {
+      const dir = data.last_direction || 'Peer A ⇄ Peer B';
+      this.flowDirectionBadge.textContent = dir;
+      this.flowDirectionBadge.className = 'bridge-badge bridge-direction';
+      if (dir.includes('Peer A → Peer B')) {
+        this.flowDirectionBadge.classList.add('dir-a-to-b');
+      } else if (dir.includes('Peer B → Peer A')) {
+        this.flowDirectionBadge.classList.add('dir-b-to-a');
+      }
     }
 
     if (data.in_tunnel_ping_target) {
@@ -370,6 +403,91 @@ class AutoWGApp {
     this.totalTx.textContent = formatBytes(data.transmit_bytes);
     this.ifaceState.textContent = state === 'CONNECTED' ? 'ACTIVE (UP)' : 'MONITORING';
     this.staggerRoleDetail.textContent = data.is_primary ? 'Primary (Cycle 0)' : 'Secondary (Cycle 1)';
+
+    // Connection Events History
+    this.renderEvents(data.events);
+  }
+
+  renderEvents(events) {
+    if (!this.eventsList) return;
+    if (!events || events.length === 0) {
+      this.eventsList.innerHTML = '<div class="events-empty">No connection events recorded yet.</div>';
+      if (this.eventsCount) this.eventsCount.textContent = '0 events';
+      return;
+    }
+
+    if (this.eventsCount) {
+      this.eventsCount.textContent = `${events.length} event${events.length === 1 ? '' : 's'}`;
+    }
+
+    let html = '';
+    for (const evt of events) {
+      const isConnected = evt.type === 'CONNECTED';
+      const typeClass = isConnected ? 'connected' : 'disconnected';
+      const typeLabel = isConnected ? 'Connected' : 'Disconnected';
+
+      let dirClass = 'peer-both';
+      if (evt.direction && evt.direction.includes('Peer A → Peer B')) {
+        dirClass = 'a-to-b';
+      } else if (evt.direction && evt.direction.includes('Peer B → Peer A')) {
+        dirClass = 'b-to-a';
+      }
+
+      const date = new Date(evt.timestamp);
+      const now = Date.now();
+      const diffSec = Math.max(0, Math.round((now - date.getTime()) / 1000));
+      const clockTime = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+      let timeAgo = `${diffSec}s ago`;
+      if (diffSec >= 3600) {
+        timeAgo = `${Math.floor(diffSec / 3600)}h ${Math.floor((diffSec % 3600) / 60)}m ago`;
+      } else if (diffSec >= 60) {
+        timeAgo = `${Math.floor(diffSec / 60)}m ago`;
+      }
+
+      let durationStr = '';
+      if (evt.duration_sec && evt.duration_sec > 0) {
+        const durSec = Math.round(evt.duration_sec);
+        let formattedDur = '';
+        if (durSec < 60) {
+          formattedDur = `${durSec}s`;
+        } else if (durSec < 3600) {
+          formattedDur = `${Math.floor(durSec / 60)}m ${durSec % 60}s`;
+        } else {
+          formattedDur = `${Math.floor(durSec / 3600)}h ${Math.floor((durSec % 3600) / 60)}m`;
+        }
+
+        if (isConnected) {
+          durationStr = ` • Down for ${formattedDur}`;
+        } else {
+          durationStr = ` • Was up for ${formattedDur}`;
+        }
+      }
+
+      const initiatorText = evt.initiator ? ` (Initiator: ${escapeHtml(evt.initiator)})` : '';
+      const reasonText = evt.reason ? escapeHtml(evt.reason) : '';
+      const localRoleText = evt.local_role ? `Local: ${escapeHtml(evt.local_role)}` : '';
+
+      html += `
+        <div class="event-item">
+          <div class="event-left">
+            <span class="event-badge ${typeClass}">${typeLabel}</span>
+            <span class="event-direction-badge ${dirClass}">${escapeHtml(evt.direction || 'Peer A ⇄ Peer B')}</span>
+            <div class="event-info">
+              <div class="event-reason">${reasonText}${initiatorText}</div>
+              <div class="event-duration">${localRoleText}${durationStr}</div>
+            </div>
+          </div>
+          <div class="event-right">
+            <span class="event-time-ago">${timeAgo}</span>
+            <span class="event-time-clock">${clockTime}</span>
+          </div>
+        </div>
+      `;
+    }
+
+    this.eventsList.innerHTML = html;
+  }
   }
 
   connectLogStream() {

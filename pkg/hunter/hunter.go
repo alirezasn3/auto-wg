@@ -18,38 +18,55 @@ import (
 )
 
 const (
-	StateConnected = "CONNECTED"
-	StateStalled   = "STALLED"
-	StateHunting   = "HUNTING"
-	StateUnknown   = "UNKNOWN"
+	StateConnected    = "CONNECTED"
+	StateDisconnected = "DISCONNECTED"
+	StateStalled      = "STALLED"
+	StateHunting      = "HUNTING"
+	StateUnknown      = "UNKNOWN"
 )
 
+type ConnectionEvent struct {
+	ID          int64     `json:"id"`
+	Type        string    `json:"type"`        // "CONNECTED" or "DISCONNECTED"
+	Timestamp   time.Time `json:"timestamp"`
+	Direction   string    `json:"direction"`   // "Peer A → Peer B" or "Peer B → Peer A"
+	Initiator   string    `json:"initiator"`   // "Peer A" or "Peer B"
+	LocalRole   string    `json:"local_role"`  // "Peer A" or "Peer B"
+	LocalPort   int       `json:"local_port"`
+	RemotePort  int       `json:"remote_port"`
+	TargetIP    string    `json:"target_ip"`
+	Reason      string    `json:"reason"`
+	DurationSec float64   `json:"duration_sec"`// Duration of state that just ended
+}
+
 type StatusReport struct {
-	State              string        `json:"state"`
-	Interface          string        `json:"interface"`
-	LocalPublicKey     string        `json:"local_public_key"`
-	PeerPublicKey      string        `json:"peer_public_key"`
-	TargetIP           string        `json:"target_ip"`
-	InTunnelPingTarget string        `json:"in_tunnel_ping_target"`
-	LocalPort          int           `json:"local_port"`
-	RemotePort         int           `json:"remote_port"`
-	LastHandshake      time.Time     `json:"last_handshake"`
-	HandshakeAge       time.Duration `json:"handshake_age"`
-	HandshakeAgeSec    float64       `json:"handshake_age_seconds"`
-	LastConnectedAt    time.Time     `json:"last_connected_at"`
-	LastDisconnectedAt time.Time     `json:"last_disconnected_at"`
-	TransmitBytes      int64         `json:"transmit_bytes"`
-	ReceiveBytes       int64         `json:"receive_bytes"`
-	TotalHunts         int64         `json:"total_hunts"`
-	SuccessfulHunts    int64         `json:"successful_hunts"`
-	CurrentAttempt     int           `json:"current_attempt"`
-	FailedPings        int           `json:"failed_pings"`
-	LastHuntTime       time.Time     `json:"last_hunt_time"`
-	LastHuntReason     string        `json:"last_hunt_reason"`
-	IptablesActive     bool          `json:"iptables_active"`
-	LocalPortRange     string        `json:"local_port_range"`
-	RemotePortRange    string        `json:"remote_port_range"`
-	IsPrimary          bool          `json:"is_primary"`
+	State              string            `json:"state"`
+	Interface          string            `json:"interface"`
+	LocalPublicKey     string            `json:"local_public_key"`
+	PeerPublicKey      string            `json:"peer_public_key"`
+	TargetIP           string            `json:"target_ip"`
+	InTunnelPingTarget string            `json:"in_tunnel_ping_target"`
+	LocalPort          int               `json:"local_port"`
+	RemotePort         int               `json:"remote_port"`
+	LastHandshake      time.Time         `json:"last_handshake"`
+	HandshakeAge       time.Duration     `json:"handshake_age"`
+	HandshakeAgeSec    float64           `json:"handshake_age_seconds"`
+	LastConnectedAt    time.Time         `json:"last_connected_at"`
+	LastDisconnectedAt time.Time         `json:"last_disconnected_at"`
+	LastDirection      string            `json:"last_direction"`
+	Events             []ConnectionEvent `json:"events"`
+	TransmitBytes      int64             `json:"transmit_bytes"`
+	ReceiveBytes       int64             `json:"receive_bytes"`
+	TotalHunts         int64             `json:"total_hunts"`
+	SuccessfulHunts    int64             `json:"successful_hunts"`
+	CurrentAttempt     int               `json:"current_attempt"`
+	FailedPings        int               `json:"failed_pings"`
+	LastHuntTime       time.Time         `json:"last_hunt_time"`
+	LastHuntReason     string            `json:"last_hunt_reason"`
+	IptablesActive     bool              `json:"iptables_active"`
+	LocalPortRange     string            `json:"local_port_range"`
+	RemotePortRange    string            `json:"remote_port_range"`
+	IsPrimary          bool              `json:"is_primary"`
 }
 
 type Hunter struct {
@@ -61,28 +78,33 @@ type Hunter struct {
 	mu         sync.RWMutex
 
 	// Live state
-	state              string
-	localPubKey        string
-	peerPubKey         string
-	targetIP           string
-	pingTarget         string
-	localPort          int
-	remotePort         int
-	lastHandshake      time.Time
-	handshakeAge       time.Duration
-	lastConnectedAt    time.Time
-	lastDisconnectedAt time.Time
-	txBytes            int64
-	rxBytes            int64
-	lastRxBytes        int64
-	failedPings        int
-	totalHunts         int64
-	successfulHunts    int64
-	currentAttempt     int
-	lastHuntTime       time.Time
-	lastHuntReason     string
-	iptablesActive     bool
-	manualTrigger      chan string
+	state                string
+	localPubKey          string
+	peerPubKey           string
+	targetIP             string
+	pingTarget           string
+	localPort            int
+	remotePort           int
+	lastHandshake        time.Time
+	handshakeAge         time.Duration
+	lastConnectedAt      time.Time
+	lastDisconnectedAt   time.Time
+	lastDialedRemotePort int
+	lastDialedAt         time.Time
+	lastDirection        string
+	events               []ConnectionEvent
+	nextEventID          int64
+	txBytes              int64
+	rxBytes              int64
+	lastRxBytes          int64
+	failedPings          int
+	totalHunts           int64
+	successfulHunts      int64
+	currentAttempt       int
+	lastHuntTime         time.Time
+	lastHuntReason       string
+	iptablesActive       bool
+	manualTrigger        chan string
 }
 
 func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *iptables.Manager, log *logger.Logger) *Hunter {
@@ -93,7 +115,36 @@ func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *ipta
 		iptMgr:        iptMgr,
 		log:           log,
 		state:         StateUnknown,
+		lastDirection: "Peer A ⇄ Peer B",
+		events:        make([]ConnectionEvent, 0, 50),
 		manualTrigger: make(chan string, 10),
+	}
+}
+
+func (h *Hunter) addEvent(eventType string, direction string, initiator string, reason string, durationSec float64) {
+	h.nextEventID++
+	localRole := "Peer B"
+	if h.localPubKey != "" && h.peerPubKey != "" && h.localPubKey < h.peerPubKey {
+		localRole = "Peer A"
+	}
+
+	evt := ConnectionEvent{
+		ID:          h.nextEventID,
+		Type:        eventType,
+		Timestamp:   time.Now(),
+		Direction:   direction,
+		Initiator:   initiator,
+		LocalRole:   localRole,
+		LocalPort:   h.localPort,
+		RemotePort:  h.remotePort,
+		TargetIP:    h.targetIP,
+		Reason:      reason,
+		DurationSec: durationSec,
+	}
+
+	h.events = append([]ConnectionEvent{evt}, h.events...)
+	if len(h.events) > 50 {
+		h.events = h.events[:50]
 	}
 }
 
@@ -228,13 +279,25 @@ func (h *Hunter) tick(ctx context.Context) {
 			h.log.Info("HUNTER", "===============================================================")
 			h.successfulHunts++
 			h.currentAttempt = 0
+
+			dir, init := h.determineDirection(isPrimary, dev.PeerPort)
+			h.lastDirection = dir
+			var downtimeSec float64
+			if !h.lastDisconnectedAt.IsZero() {
+				downtimeSec = time.Since(h.lastDisconnectedAt).Seconds()
+			}
 			h.lastConnectedAt = time.Now()
+			h.addEvent(StateConnected, dir, init, fmt.Sprintf("5-tuple: :%d -> %s", h.localPort, remoteEndpointStr), downtimeSec)
 		} else if h.lastConnectedAt.IsZero() {
 			if !dev.LastHandshake.IsZero() {
 				h.lastConnectedAt = dev.LastHandshake
 			} else {
 				h.lastConnectedAt = time.Now()
 			}
+			dir := "Peer A ⇄ Peer B"
+			h.lastDirection = dir
+			remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
+			h.addEvent(StateConnected, dir, "Initial Handshake", fmt.Sprintf("Link active: :%d -> %s", h.localPort, remoteEndpointStr), 0)
 		}
 		h.state = StateConnected
 		h.failedPings = 0
@@ -261,9 +324,21 @@ func (h *Hunter) tick(ctx context.Context) {
 				h.log.Info("HUNTER", "===============================================================")
 				h.successfulHunts++
 				h.currentAttempt = 0
+
+				dir, init := h.determineDirection(isPrimary, dev.PeerPort)
+				h.lastDirection = dir
+				var downtimeSec float64
+				if !h.lastDisconnectedAt.IsZero() {
+					downtimeSec = time.Since(h.lastDisconnectedAt).Seconds()
+				}
 				h.lastConnectedAt = time.Now()
+				h.addEvent(StateConnected, dir, init, fmt.Sprintf("Ping verified: :%d -> %s", h.localPort, remoteEndpointStr), downtimeSec)
 			} else if h.lastConnectedAt.IsZero() {
 				h.lastConnectedAt = time.Now()
+				dir := "Peer A ⇄ Peer B"
+				h.lastDirection = dir
+				remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
+				h.addEvent(StateConnected, dir, "Initial Ping", fmt.Sprintf("Ping verified: :%d -> %s", h.localPort, remoteEndpointStr), 0)
 			}
 			h.state = StateConnected
 			h.mu.Unlock()
@@ -279,6 +354,11 @@ func (h *Hunter) tick(ctx context.Context) {
 			// In grace verification period, do not hunt yet!
 			if h.state == StateConnected {
 				h.lastDisconnectedAt = time.Now()
+				var uptimeSec float64
+				if !h.lastConnectedAt.IsZero() {
+					uptimeSec = time.Since(h.lastConnectedAt).Seconds()
+				}
+				h.addEvent(StateDisconnected, h.lastDirection, "", fmt.Sprintf("in-tunnel ping #%d/%d failed", h.failedPings, threshold), uptimeSec)
 			}
 			h.state = StateStalled
 			h.lastHuntReason = fmt.Sprintf("verifying_stalled_ping_%d/%d", h.failedPings, threshold)
@@ -288,17 +368,23 @@ func (h *Hunter) tick(ctx context.Context) {
 	}
 
 	// 4. Link is confirmed dead (failed pings reached threshold, or ping disabled)!
-	if h.state == StateConnected {
-		h.lastDisconnectedAt = time.Now()
-	}
-	h.state = StateHunting
-	attempt := h.currentAttempt
 	stallReason := "handshake_expired"
 	if dev.LastHandshake.IsZero() {
 		stallReason = "no_handshake_ever"
 	} else if h.failedPings >= threshold {
 		stallReason = fmt.Sprintf("pings_failed_%d_times", h.failedPings)
 	}
+
+	if h.state == StateConnected {
+		h.lastDisconnectedAt = time.Now()
+		var uptimeSec float64
+		if !h.lastConnectedAt.IsZero() {
+			uptimeSec = time.Since(h.lastConnectedAt).Seconds()
+		}
+		h.addEvent(StateDisconnected, h.lastDirection, "", stallReason, uptimeSec)
+	}
+	h.state = StateHunting
+	attempt := h.currentAttempt
 	h.mu.Unlock()
 
 	// Role-staggered turn coordination
@@ -328,6 +414,35 @@ func (h *Hunter) tick(ctx context.Context) {
 		}
 		h.log.Debug("HUNTER", "Waiting for peer's staggered hunt window (My role: %s, Attempt: #%d)", roleName, attempt)
 	}
+}
+
+func (h *Hunter) determineDirection(isPrimary bool, currentRemotePort int) (string, string) {
+	localInitiated := false
+	if !h.lastDialedAt.IsZero() && time.Since(h.lastDialedAt) < 2*time.Minute {
+		if currentRemotePort == h.lastDialedRemotePort && h.lastDialedRemotePort > 0 {
+			localInitiated = true
+		}
+	}
+
+	direction := "Peer A → Peer B"
+	initiator := "Peer A"
+	if isPrimary {
+		// Local is Peer A
+		if !localInitiated {
+			direction = "Peer B → Peer A"
+			initiator = "Peer B"
+		}
+	} else {
+		// Local is Peer B
+		if localInitiated {
+			direction = "Peer B → Peer A"
+			initiator = "Peer B"
+		} else {
+			direction = "Peer A → Peer B"
+			initiator = "Peer A"
+		}
+	}
+	return direction, initiator
 }
 
 func (h *Hunter) executeHunt(reason string) {
@@ -385,7 +500,12 @@ func (h *Hunter) executeHunt(reason string) {
 		h.log.Warn("HUNTER", "Failed to update peer endpoint to %s: %v", newEndpoint, err)
 	}
 
-	// 3. Trigger handshake packet burst
+	h.mu.Lock()
+	h.lastDialedRemotePort = newRemotePort
+	h.lastDialedAt = time.Now()
+	h.mu.Unlock()
+
+	// 4. Trigger handshake packet burst
 	h.triggerPacketBurst(targetIP, newRemotePort)
 }
 
@@ -497,6 +617,14 @@ func (h *Hunter) GetStatus() StatusReport {
 		isPrimary = h.localPubKey < h.peerPubKey
 	}
 
+	eventsCopy := make([]ConnectionEvent, len(h.events))
+	copy(eventsCopy, h.events)
+
+	lastDir := h.lastDirection
+	if lastDir == "" {
+		lastDir = "Peer A ⇄ Peer B"
+	}
+
 	return StatusReport{
 		State:              h.state,
 		Interface:          h.cfg.WireGuard.Interface,
@@ -511,6 +639,8 @@ func (h *Hunter) GetStatus() StatusReport {
 		HandshakeAgeSec:    hsAgeSec,
 		LastConnectedAt:    h.lastConnectedAt,
 		LastDisconnectedAt: h.lastDisconnectedAt,
+		LastDirection:      lastDir,
+		Events:             eventsCopy,
 		TransmitBytes:      h.txBytes,
 		ReceiveBytes:       h.rxBytes,
 		TotalHunts:         h.totalHunts,
