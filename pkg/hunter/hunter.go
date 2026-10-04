@@ -2,9 +2,12 @@ package hunter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,13 +72,26 @@ type StatusReport struct {
 	IsPrimary          bool              `json:"is_primary"`
 }
 
+type HistoryState struct {
+	LastState          string            `json:"last_state,omitempty"`
+	LastConnectedAt    time.Time         `json:"last_connected_at,omitempty"`
+	LastDisconnectedAt time.Time         `json:"last_disconnected_at,omitempty"`
+	LastDirection      string            `json:"last_direction,omitempty"`
+	TotalHunts         int64             `json:"total_hunts"`
+	SuccessfulHunts    int64             `json:"successful_hunts"`
+	NextEventID        int64             `json:"next_event_id"`
+	Events             []ConnectionEvent `json:"events,omitempty"`
+	SavedAt            time.Time         `json:"saved_at,omitempty"`
+}
+
 type Hunter struct {
-	cfgPath    string
-	cfg        *config.Config
-	wgCtrl     *wg.Controller
-	iptMgr     *iptables.Manager
-	log        *logger.Logger
-	mu         sync.RWMutex
+	cfgPath     string
+	cfg         *config.Config
+	historyFile string
+	wgCtrl      *wg.Controller
+	iptMgr      *iptables.Manager
+	log         *logger.Logger
+	mu          sync.RWMutex
 
 	// Live state
 	state                string
@@ -108,9 +124,18 @@ type Hunter struct {
 }
 
 func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *iptables.Manager, log *logger.Logger) *Hunter {
-	return &Hunter{
+	histFile := cfg.Hunter.HistoryFile
+	if histFile == "" && cfgPath != "" {
+		histFile = filepath.Join(filepath.Dir(cfgPath), "history.json")
+	}
+	if histFile == "off" || histFile == "none" {
+		histFile = ""
+	}
+
+	h := &Hunter{
 		cfgPath:       cfgPath,
 		cfg:           cfg,
+		historyFile:   histFile,
 		wgCtrl:        wgCtrl,
 		iptMgr:        iptMgr,
 		log:           log,
@@ -119,6 +144,109 @@ func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *ipta
 		events:        make([]ConnectionEvent, 0, 50),
 		manualTrigger: make(chan string, 10),
 	}
+	h.loadHistory()
+	return h
+}
+
+func (h *Hunter) loadHistory() {
+	if h.historyFile == "" {
+		return
+	}
+
+	data, err := os.ReadFile(h.historyFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			h.log.Warn("HUNTER", "Could not read history file %s: %v", h.historyFile, err)
+		}
+		return
+	}
+
+	var state HistoryState
+	if err := json.Unmarshal(data, &state); err != nil {
+		h.log.Warn("HUNTER", "Could not parse history file %s: %v", h.historyFile, err)
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.lastConnectedAt = state.LastConnectedAt
+	h.lastDisconnectedAt = state.LastDisconnectedAt
+	if state.LastDirection != "" {
+		h.lastDirection = state.LastDirection
+	}
+	h.totalHunts = state.TotalHunts
+	h.successfulHunts = state.SuccessfulHunts
+	h.nextEventID = state.NextEventID
+	if len(state.Events) > 0 {
+		h.events = state.Events
+		for _, e := range h.events {
+			if e.ID > h.nextEventID {
+				h.nextEventID = e.ID
+			}
+		}
+	}
+
+	h.log.Info("HUNTER", "Loaded persistent history from %s (%d events, %d total hunts, %d successful)",
+		h.historyFile, len(h.events), h.totalHunts, h.successfulHunts)
+}
+
+func (h *Hunter) saveHistoryLocked() error {
+	if h.historyFile == "" {
+		return nil
+	}
+
+	eventsCopy := make([]ConnectionEvent, len(h.events))
+	copy(eventsCopy, h.events)
+
+	state := HistoryState{
+		LastState:          h.state,
+		LastConnectedAt:    h.lastConnectedAt,
+		LastDisconnectedAt: h.lastDisconnectedAt,
+		LastDirection:      h.lastDirection,
+		TotalHunts:         h.totalHunts,
+		SuccessfulHunts:    h.successfulHunts,
+		NextEventID:        h.nextEventID,
+		Events:             eventsCopy,
+		SavedAt:            time.Now(),
+	}
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(h.historyFile)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+	}
+
+	tmpFile := h.historyFile + ".tmp"
+	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpFile, h.historyFile); err != nil {
+		_ = os.Remove(h.historyFile)
+		return os.Rename(tmpFile, h.historyFile)
+	}
+	return nil
+}
+
+// SaveHistory writes the current history and stats to disk.
+func (h *Hunter) SaveHistory() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.saveHistoryLocked()
+}
+
+// SetHistoryFile updates the persistent history file path.
+func (h *Hunter) SetHistoryFile(path string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.historyFile = path
 }
 
 func (h *Hunter) addEvent(eventType string, direction string, initiator string, reason string, durationSec float64) {
@@ -146,11 +274,15 @@ func (h *Hunter) addEvent(eventType string, direction string, initiator string, 
 	if len(h.events) > 50 {
 		h.events = h.events[:50]
 	}
+	_ = h.saveHistoryLocked()
 }
 
 // Start runs the autonomous monitoring and hunting loop.
 func (h *Hunter) Start(ctx context.Context) {
 	h.log.Info("HUNTER", "Starting Autonomous WireGuard Hunter (Zero-Negotiator Mode)")
+	defer func() {
+		_ = h.SaveHistory()
+	}()
 
 	// Apply iptables rule if enabled
 	h.applyIptablesRule()
@@ -352,7 +484,7 @@ func (h *Hunter) tick(ctx context.Context) {
 
 		if h.failedPings < threshold {
 			// In grace verification period, do not hunt yet!
-			if h.state == StateConnected {
+			if h.state == StateConnected || (h.state == StateUnknown && !h.lastConnectedAt.IsZero() && (h.lastDisconnectedAt.IsZero() || h.lastConnectedAt.After(h.lastDisconnectedAt))) {
 				h.lastDisconnectedAt = time.Now()
 				var uptimeSec float64
 				if !h.lastConnectedAt.IsZero() {
@@ -375,7 +507,7 @@ func (h *Hunter) tick(ctx context.Context) {
 		stallReason = fmt.Sprintf("pings_failed_%d_times", h.failedPings)
 	}
 
-	if h.state == StateConnected {
+	if h.state == StateConnected || (h.state == StateUnknown && !h.lastConnectedAt.IsZero() && (h.lastDisconnectedAt.IsZero() || h.lastConnectedAt.After(h.lastDisconnectedAt))) {
 		h.lastDisconnectedAt = time.Now()
 		var uptimeSec float64
 		if !h.lastConnectedAt.IsZero() {
@@ -442,6 +574,7 @@ func (h *Hunter) executeHunt(reason string) {
 	h.lastHuntTime = time.Now()
 	h.lastHuntReason = reason
 	attempt := h.currentAttempt
+	_ = h.saveHistoryLocked()
 	h.mu.Unlock()
 
 	if targetIP == "" {
@@ -560,6 +693,12 @@ func (h *Hunter) UpdateConfig(newCfg *config.Config) error {
 	h.mu.Lock()
 	oldIptablesRange := h.cfg.Iptables.PortRange
 	oldIptablesEnabled := h.cfg.Iptables.Enabled
+	if newCfg.Hunter.HistoryFile != h.cfg.Hunter.HistoryFile {
+		h.historyFile = newCfg.Hunter.HistoryFile
+		if h.historyFile == "off" || h.historyFile == "none" {
+			h.historyFile = ""
+		}
+	}
 	h.cfg = newCfg
 	h.mu.Unlock()
 

@@ -44,6 +44,10 @@ hunter:
     interval: 2s
     failure_threshold: 3
 
+  # Local persistent history file so uptime, hunt stats, and events survive restarts
+  # Defaults to "history.json" alongside the configuration file. Set to "off" to disable.
+  # history_file: "history.json"
+
 web:
   # Modern web dashboard & live telemetry
   enabled: true

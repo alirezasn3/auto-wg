@@ -47,6 +47,33 @@
       gap: 20px;
     }
 
+    /* RTL / Persian Typography */
+    html[dir="rtl"] {
+      font-family: -apple-system, BlinkMacSystemFont, "Vazirmatn", "Sahel", "Tahoma", "Segoe UI", sans-serif;
+    }
+
+    html[dir="rtl"] .uptime-value {
+      font-family: "Vazirmatn", "Tahoma", var(--font-mono);
+      direction: rtl;
+    }
+
+    html[dir="rtl"] .metric-value {
+      font-family: "Vazirmatn", "Tahoma", var(--font-mono);
+    }
+
+    html[dir="rtl"] .event-time {
+      text-align: left;
+      font-family: "Vazirmatn", "Tahoma", var(--font-mono);
+    }
+
+    html[dir="rtl"] .history-count {
+      font-family: "Vazirmatn", "Tahoma", var(--font-mono);
+    }
+
+    html[dir="rtl"] .footer-updated {
+      font-family: "Vazirmatn", "Tahoma", var(--font-mono);
+    }
+
     /* Header */
     .header {
       display: flex;
@@ -60,6 +87,35 @@
       font-size: 20px;
       font-weight: 700;
       letter-spacing: -0.3px;
+      color: #fff;
+    }
+
+    .header-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .btn-lang {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 20px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+    }
+
+    .btn-lang:hover {
+      background: var(--bg-card-subtle);
+      border-color: var(--accent);
       color: #fff;
     }
 
@@ -172,10 +228,10 @@
       color: var(--text-muted);
     }
 
-    /* Metrics Grid */
+    /* Metrics Grid - Simplified 2 Columns */
     .metrics-grid {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(2, 1fr);
       gap: 12px;
     }
 
@@ -366,9 +422,14 @@
       <div class="header-title-group">
         <h1 id="pageTitle">{{.Title}}</h1>
       </div>
-      <div class="live-badge" id="liveBadge">
-        <span class="live-dot" id="liveDot"></span>
-        <span id="liveBadgeText">Live Monitoring</span>
+      <div class="header-controls">
+        <button id="btnLangToggle" class="btn-lang" type="button" aria-label="Toggle language">
+          <span id="langBtnText">فا</span>
+        </button>
+        <div class="live-badge" id="liveBadge">
+          <span class="live-dot" id="liveDot"></span>
+          <span id="liveBadgeText">Live Monitoring</span>
+        </div>
       </div>
     </header>
 
@@ -392,33 +453,25 @@
       </div>
     </section>
 
-    <!-- Metrics Grid -->
+    <!-- Metrics Grid (Simplified: 2 cards) -->
     <section class="metrics-grid">
       <div class="metric-card">
-        <span class="metric-title">Availability</span>
+        <span class="metric-title" id="lblAvailability">Availability</span>
         <span class="metric-value" id="metricAvailability">{{printf "%.2f" .UptimePercent}}%</span>
-        <span class="metric-meta">Recorded History</span>
+        <span class="metric-meta" id="lblRecordedHistory">Recorded History</span>
       </div>
 
       <div class="metric-card">
-        <span class="metric-title">Last Interruption</span>
+        <span class="metric-title" id="lblLastInterruption">Last Interruption</span>
         <span class="metric-value" id="metricLastDowntime">{{if .LastDowntimeFormatted}}{{.LastDowntimeFormatted}}{{else}}None{{end}}</span>
         <span class="metric-meta" id="metricLastDowntimeAgo">{{if .LastDowntimeAgo}}{{.LastDowntimeAgo}}{{else}}No outages recorded{{end}}</span>
-      </div>
-
-      <div class="metric-card">
-        <span class="metric-title">Current State</span>
-        <span class="metric-value" id="metricState" style="color: {{if .Connected}}var(--success){{else}}var(--danger){{end}};">
-          {{if .Connected}}Operational{{else}}Down{{end}}
-        </span>
-        <span class="metric-meta" id="metricServerTime">Auto-Negotiating</span>
       </div>
     </section>
 
     <!-- History / Incidents -->
     <section class="history-card">
       <div class="history-header">
-        <h3>Recent Interruption & Recovery History</h3>
+        <h3 id="lblHistoryTitle">Recent Interruption & Recovery History</h3>
         <span class="history-count" id="historyCount">{{len .Events}} events</span>
       </div>
 
@@ -437,14 +490,14 @@
             </div>
           {{end}}
         {{else}}
-          <div class="events-empty">No interruptions recorded yet. Service is 100% operational.</div>
+          <div class="events-empty" id="eventsEmpty">No interruptions recorded yet. Service is 100% operational.</div>
         {{end}}
       </div>
     </section>
 
     <!-- Footer -->
     <footer class="footer">
-      <span class="footer-powered">Auto-WG • Public Status</span>
+      <span class="footer-powered" id="footerPowered">Auto-WG • Public Status</span>
       <span class="footer-updated" id="footerUpdated">Updated live</span>
     </footer>
   </div>
@@ -462,19 +515,134 @@
       }
 
       let lastPollTime = Date.now();
+      let currentLang = localStorage.getItem('autowg_status_lang') || 'en';
 
-      function formatDuration(sec) {
-        if (!sec || sec <= 0) return '0s';
+      const I18N = {
+        en: {
+          langBtn: 'فا',
+          liveMonitoring: 'Live Monitoring',
+          allOperational: 'All Systems Operational',
+          serviceInterruption: 'Service Interruption',
+          operationalDesc: 'The tunnel is active and passing traffic.',
+          interruptedDesc: 'The tunnel is interrupted; automatic port recovery in progress.',
+          continuousUptime: 'Continuous Uptime',
+          downtimeInProgress: 'Downtime in Progress',
+          connectedSince: 'Connected since ',
+          disconnectedSince: 'Disconnected since ',
+          connected: 'Connected',
+          disconnected: 'Disconnected',
+          availability: 'Availability',
+          recordedHistory: 'Recorded History',
+          lastInterruption: 'Last Interruption',
+          none: 'None',
+          noOutages: 'No outages recorded',
+          historyTitle: 'Recent Interruption & Recovery History',
+          noEvents: 'No interruptions recorded yet. Service is 100% operational.',
+          eventsCount: count => `${count} event${count === 1 ? '' : 's'}`,
+          footerPowered: 'Auto-WG • Public Status',
+          updatedLive: 'Updated live',
+          updatedAt: time => `Updated ${time}`,
+        },
+        fa: {
+          langBtn: 'EN',
+          liveMonitoring: 'پایش زنده',
+          allOperational: 'تمامی سرویس‌ها فعال هستند',
+          serviceInterruption: 'اختلال در اتصال سرویس',
+          operationalDesc: 'تونل فعال است و تبادل داده بدون وقفه انجام می‌شود.',
+          interruptedDesc: 'اتصال موقتاً قطع شده است؛ بازیابی خودکار پورت در حال انجام است.',
+          continuousUptime: 'مدت زمان پایداری مداوم',
+          downtimeInProgress: 'مدت زمان قطعی فعلی',
+          connectedSince: 'متصل از ',
+          disconnectedSince: 'قطع شده از ',
+          connected: 'متصل',
+          disconnected: 'قطع شده',
+          availability: 'نرخ پایداری',
+          recordedHistory: 'بر اساس تاریخچه ثبت‌شده',
+          lastInterruption: 'آخرین قطعی ثبت‌شده',
+          none: 'بدون اختلال',
+          noOutages: 'هیچ قطعی ثبت نشده است',
+          historyTitle: 'تاریخچه اختلالات و بازیابی‌های اخیر',
+          noEvents: 'تاکنون هیچ اختلالی ثبت نشده است. سرویس با پایداری ۱۰۰٪ فعال است.',
+          eventsCount: count => `${toPersianDigits(count)} رویداد`,
+          footerPowered: 'Auto-WG • وضعیت عمومی سرویس',
+          updatedLive: 'به‌روزرسانی لحظه‌ای',
+          updatedAt: time => `به‌روزرسانی در ${time}`,
+        }
+      };
+
+      function toPersianDigits(str) {
+        const farsiDigits = ['۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹'];
+        return String(str).replace(/[0-9]/g, w => farsiDigits[+w]);
+      }
+
+      function formatDuration(sec, lang) {
+        if (!sec || sec <= 0) {
+          return lang === 'fa' ? '۰ ثانیه' : '0s';
+        }
         const s = Math.floor(sec);
         const days = Math.floor(s / 86400);
         const hours = Math.floor((s % 86400) / 3600);
         const mins = Math.floor((s % 3600) / 60);
         const secs = s % 60;
 
+        if (lang === 'fa') {
+          const parts = [];
+          if (days > 0) parts.push(`${toPersianDigits(days)} روز`);
+          if (hours > 0) parts.push(`${toPersianDigits(hours)} ساعت`);
+          if (mins > 0) parts.push(`${toPersianDigits(mins)} دقیقه`);
+          if (parts.length === 0 || (days === 0 && hours === 0)) {
+            parts.push(`${toPersianDigits(secs)} ثانیه`);
+          }
+          return parts.join(' و ');
+        }
+
         if (days > 0) return `${days}d ${hours}h ${mins}m ${secs}s`;
         if (hours > 0) return `${hours}h ${mins}m ${secs}s`;
         if (mins > 0) return `${mins}m ${secs}s`;
         return `${secs}s`;
+      }
+
+      function formatRelativeTime(dateStr, lang) {
+        if (!dateStr) return lang === 'fa' ? 'بدون تاریخچه' : 'Never';
+        const t = new Date(dateStr).getTime();
+        if (isNaN(t)) return '';
+        const diffSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+
+        if (lang === 'fa') {
+          if (diffSec < 60) return `${toPersianDigits(diffSec)} ثانیه پیش`;
+          const mins = Math.floor(diffSec / 60);
+          if (mins < 60) return `${toPersianDigits(mins)} دقیقه پیش`;
+          const hours = Math.floor(mins / 60);
+          if (hours < 24) return `${toPersianDigits(hours)} ساعت پیش`;
+          const days = Math.floor(hours / 24);
+          return `${toPersianDigits(days)} روز پیش`;
+        }
+
+        if (diffSec < 60) return `${diffSec}s ago`;
+        const mins = Math.floor(diffSec / 60);
+        if (mins < 60) return `${mins}m ago`;
+        const hours = Math.floor(mins / 60);
+        if (hours < 24) return `${hours}h ${mins % 60}m ago`;
+        const days = Math.floor(hours / 24);
+        return `${days}d ${hours % 24}h ago`;
+      }
+
+      function formatDateTime(dateStr, lang) {
+        if (!dateStr) return '';
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return dateStr;
+
+        if (lang === 'fa') {
+          try {
+            const datePart = d.toLocaleDateString('fa-IR', { month: 'short', day: 'numeric' });
+            const timePart = d.toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            return `${datePart} ${timePart}`;
+          } catch (e) {
+            return d.toLocaleString();
+          }
+        }
+
+        return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
       }
 
       function updateLiveTicker() {
@@ -485,15 +653,14 @@
         const elapsed = (Date.now() - lastPollTime) / 1000;
         if (currentData.connected) {
           const totalSec = (currentData.uptime_seconds || 0) + elapsed;
-          uptimeEl.textContent = formatDuration(totalSec);
+          uptimeEl.textContent = formatDuration(totalSec, currentLang);
         } else {
-          // If down, calculate downtime seconds
           let downSec = elapsed;
           if (currentData.last_disconnected_at) {
             const discTime = new Date(currentData.last_disconnected_at).getTime();
             downSec = Math.max(0, (Date.now() - discTime) / 1000);
           }
-          uptimeEl.textContent = formatDuration(downSec);
+          uptimeEl.textContent = formatDuration(downSec, currentLang);
         }
       }
 
@@ -501,6 +668,26 @@
         if (!data) return;
         currentData = data;
         lastPollTime = Date.now();
+        const t = I18N[currentLang];
+
+        // Static labels
+        const liveBadgeText = document.getElementById('liveBadgeText');
+        if (liveBadgeText) liveBadgeText.textContent = t.liveMonitoring;
+
+        const lblAvail = document.getElementById('lblAvailability');
+        if (lblAvail) lblAvail.textContent = t.availability;
+
+        const lblRec = document.getElementById('lblRecordedHistory');
+        if (lblRec) lblRec.textContent = t.recordedHistory;
+
+        const lblLastInt = document.getElementById('lblLastInterruption');
+        if (lblLastInt) lblLastInt.textContent = t.lastInterruption;
+
+        const lblHist = document.getElementById('lblHistoryTitle');
+        if (lblHist) lblHist.textContent = t.historyTitle;
+
+        const powered = document.getElementById('footerPowered');
+        if (powered) powered.textContent = t.footerPowered;
 
         // 1. Banner
         const banner = document.getElementById('statusBanner');
@@ -509,66 +696,107 @@
         const desc = document.getElementById('statusDescription');
         const uptimeLabel = document.getElementById('uptimeLabel');
         const uptimeSub = document.getElementById('uptimeSubtext');
-        const metricState = document.getElementById('metricState');
 
         if (data.connected) {
           banner.className = 'status-banner is-operational';
           icon.textContent = '🟢';
-          headline.textContent = 'All Systems Operational';
-          desc.textContent = 'The tunnel is active and passing traffic.';
-          uptimeLabel.textContent = 'Continuous Uptime';
-          uptimeSub.textContent = data.last_connected_at ? `Connected since ${new Date(data.last_connected_at).toLocaleString()}` : 'Connected';
-          metricState.textContent = 'Operational';
-          metricState.style.color = 'var(--success)';
+          headline.textContent = t.allOperational;
+          desc.textContent = t.operationalDesc;
+          uptimeLabel.textContent = t.continuousUptime;
+          if (data.last_connected_at) {
+            uptimeSub.textContent = t.connectedSince + formatRelativeTime(data.last_connected_at, currentLang);
+          } else {
+            uptimeSub.textContent = t.connected;
+          }
         } else {
           banner.className = 'status-banner is-disrupted';
           icon.textContent = '🔴';
-          headline.textContent = 'Service Interruption';
-          desc.textContent = 'The tunnel is interrupted; automatic port recovery in progress.';
-          uptimeLabel.textContent = 'Downtime in Progress';
-          uptimeSub.textContent = data.last_disconnected_at ? `Disconnected since ${new Date(data.last_disconnected_at).toLocaleString()}` : 'Interrupted';
-          metricState.textContent = 'Down';
-          metricState.style.color = 'var(--danger)';
+          headline.textContent = t.serviceInterruption;
+          desc.textContent = t.interruptedDesc;
+          uptimeLabel.textContent = t.downtimeInProgress;
+          if (data.last_disconnected_at) {
+            uptimeSub.textContent = t.disconnectedSince + formatRelativeTime(data.last_disconnected_at, currentLang);
+          } else {
+            uptimeSub.textContent = t.disconnected;
+          }
         }
 
         // 2. Metrics
         const avail = document.getElementById('metricAvailability');
         if (avail && data.uptime_percent !== undefined) {
-          avail.textContent = data.uptime_percent.toFixed(2) + '%';
+          const pctStr = data.uptime_percent.toFixed(2);
+          avail.textContent = currentLang === 'fa' ? `${toPersianDigits(pctStr)}٪` : `${pctStr}%`;
         }
 
         const lastDown = document.getElementById('metricLastDowntime');
+        const lastDownAgo = document.getElementById('metricLastDowntimeAgo');
         if (lastDown) {
-          lastDown.textContent = data.last_downtime_formatted || 'None';
+          if (data.last_downtime_seconds && data.last_downtime_seconds > 0) {
+            lastDown.textContent = formatDuration(data.last_downtime_seconds, currentLang);
+          } else {
+            lastDown.textContent = t.none;
+          }
+        }
+        if (lastDownAgo) {
+          if (data.last_disconnected_at) {
+            lastDownAgo.textContent = formatRelativeTime(data.last_disconnected_at, currentLang);
+          } else {
+            lastDownAgo.textContent = t.noOutages;
+          }
         }
 
         // 3. Events Timeline
         const count = document.getElementById('historyCount');
         if (count && data.events) {
-          count.textContent = `${data.events.length} event${data.events.length === 1 ? '' : 's'}`;
+          count.textContent = t.eventsCount(data.events.length);
         }
 
         const timeline = document.getElementById('eventsTimeline');
         if (timeline && data.events) {
           if (data.events.length === 0) {
-            timeline.innerHTML = '<div class="events-empty">No interruptions recorded yet. Service is 100% operational.</div>';
+            timeline.innerHTML = `<div class="events-empty">${t.noEvents}</div>`;
           } else {
             let html = '';
             for (const ev of data.events) {
               const isConn = ev.type === 'CONNECTED';
               const dotClass = isConn ? 'connected' : 'disconnected';
-              const timeStr = new Date(ev.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-              const dateStr = new Date(ev.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' });
+              let msg = ev.message;
+              let dur = ev.duration;
+
+              if (currentLang === 'fa') {
+                if (isConn) {
+                  if (ev.duration_sec > 0) {
+                    msg = 'اتصال مجدداً برقرار شد';
+                    dur = `مدت قطعی: ${formatDuration(ev.duration_sec, 'fa')}`;
+                  } else {
+                    msg = 'اتصال برقرار شد';
+                    dur = '';
+                  }
+                } else {
+                  if (ev.duration_sec > 0) {
+                    msg = 'اختلال در اتصال سرویس';
+                    dur = `مدت پایداری: ${formatDuration(ev.duration_sec, 'fa')}`;
+                  } else {
+                    msg = 'اختلال در اتصال سرویس';
+                    dur = '';
+                  }
+                }
+              } else if (ev.duration_sec > 0) {
+                dur = formatDuration(ev.duration_sec, 'en');
+              }
+
+              const formattedTime = formatDateTime(ev.timestamp, currentLang);
+
               html += `
                 <div class="event-entry">
                   <div class="event-left">
                     <span class="event-dot ${dotClass}"></span>
                     <div class="event-body">
-                      <span class="event-msg">${escapeHtml(ev.message)}</span>
-                      ${ev.duration ? `<span class="event-duration">${escapeHtml(ev.duration)}</span>` : ''}
+                      <span class="event-msg">${escapeHtml(msg)}</span>
+                      ${dur ? `<span class="event-duration">${escapeHtml(dur)}</span>` : ''}
                     </div>
                   </div>
-                  <span class="event-time">${dateStr} ${timeStr}</span>
+                  <span class="event-time">${formattedTime}</span>
                 </div>
               `;
             }
@@ -578,8 +806,20 @@
 
         const footerUpdated = document.getElementById('footerUpdated');
         if (footerUpdated) {
-          footerUpdated.textContent = 'Updated ' + new Date().toLocaleTimeString();
+          let timeStr;
+          if (currentLang === 'fa') {
+            try {
+              timeStr = new Date().toLocaleTimeString('fa-IR');
+            } catch (e) {
+              timeStr = new Date().toLocaleTimeString();
+            }
+          } else {
+            timeStr = new Date().toLocaleTimeString();
+          }
+          footerUpdated.textContent = t.updatedAt(timeStr);
         }
+
+        updateLiveTicker();
       }
 
       function escapeHtml(str) {
@@ -589,6 +829,30 @@
           .replace(/>/g, '&gt;')
           .replace(/"/g, '&quot;');
       }
+
+      function setLanguage(lang) {
+        currentLang = lang;
+        localStorage.setItem('autowg_status_lang', lang);
+        document.documentElement.lang = lang;
+        document.documentElement.dir = lang === 'fa' ? 'rtl' : 'ltr';
+
+        const btn = document.getElementById('langBtnText');
+        if (btn) btn.textContent = I18N[lang].langBtn;
+
+        if (currentData) {
+          renderStatus(currentData);
+        }
+      }
+
+      const langToggleBtn = document.getElementById('btnLangToggle');
+      if (langToggleBtn) {
+        langToggleBtn.addEventListener('click', () => {
+          setLanguage(currentLang === 'en' ? 'fa' : 'en');
+        });
+      }
+
+      // Initialize language layout
+      setLanguage(currentLang);
 
       // Live 1-second ticker
       setInterval(updateLiveTicker, 1000);
@@ -605,15 +869,6 @@
         }
       }
       setInterval(pollStatus, 8000);
-
-      // Initial formatting of event timestamps on page load
-      document.querySelectorAll('.event-time').forEach(el => {
-        const raw = el.textContent.trim();
-        if (raw && !isNaN(Date.parse(raw))) {
-          const d = new Date(raw);
-          el.textContent = `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
-        }
-      });
     })();
   </script>
 </body>

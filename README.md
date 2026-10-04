@@ -149,6 +149,7 @@ Open `http://<your-server-ip>:8080` in your browser:
 | `hunter.tunnel_ping.enabled` | bool | `true` | Active ICMP ping verification before hunting |
 | `hunter.tunnel_ping.target_ip` | string | `""` | Remote peer's in-tunnel IP to ping (e.g. `10.0.0.1`). Auto-derived from `AllowedIPs` if omitted |
 | `hunter.tunnel_ping.failure_threshold` | int | `3` | Consecutive ping timeouts before hunting |
+| `hunter.history_file` | string | `""` | Persistent history file path (default: `history.json` alongside config file; set to `"off"` to disable) |
 | `web.enabled` | bool | `true` | Enable built-in web dashboard |
 | `web.listen_addr` | string | `0.0.0.0:8080`| Web dashboard listen address |
 | `web.username` | string | `""` | Optional HTTP Basic Auth username |
@@ -157,7 +158,7 @@ Open `http://<your-server-ip>:8080` in your browser:
 | `web.https` | bool | `false` | Enable HTTPS/TLS for the admin panel |
 | `web.cert_file` | string | `""` | Path to SSL certificate (PEM) for admin panel |
 | `web.key_file` | string | `""` | Path to SSL private key (PEM) for admin panel |
-| `status_page.enabled` | bool | `false` | Enable isolated public status page (uptime & downtime only, no admin controls) |
+| `status_page.enabled` | bool | `false` | Enable isolated public status page (uptime & downtime only, no admin controls, Persian/English bilingual with RTL support) |
 | `status_page.listen_addr` | string | `0.0.0.0:8081` | Public status page listen address (`8443` if HTTPS) |
 | `status_page.title` | string | `Service Status` | Title displayed on the public status page |
 | `status_page.https` | bool | `false` | Enable HTTPS/TLS for the public status page |

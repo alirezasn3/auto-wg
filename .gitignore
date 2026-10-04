@@ -7,6 +7,11 @@
 # Configs with secrets
 config.yaml
 
+# Local persistent history
+history.json
+*.history.json
+.autowg_history.json
+
 # IDE
 .idea/
 .vscode/

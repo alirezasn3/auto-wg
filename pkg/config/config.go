@@ -37,6 +37,7 @@ type HunterConfig struct {
 	HandshakeTimeout time.Duration    `yaml:"handshake_timeout"` // Stale threshold to trigger hunt (default: 15s)
 	CycleTimeout     time.Duration    `yaml:"cycle_timeout"`     // Staggered turn duration (default: 8s)
 	TunnelPing       TunnelPingConfig `yaml:"tunnel_ping"`
+	HistoryFile      string           `yaml:"history_file"`      // Local path to persist connection events and stats (default: "history.json" in config dir)
 }
 
 type TunnelPingConfig struct {

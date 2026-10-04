@@ -106,6 +106,7 @@ func main() {
 	log.Info("MAIN", "Received shutdown signal (%v). Gracefully stopping Auto-WG...", sig)
 
 	cancel()
+	_ = h.SaveHistory()
 
 	if webServer != nil {
 		shutdownCtx, sCancel := context.WithTimeout(context.Background(), 3*time.Second)
