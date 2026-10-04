@@ -146,3 +146,76 @@ func TestServerActionRebind(t *testing.T) {
 		t.Fatalf("Action rebind returned status %d", w.Code)
 	}
 }
+
+func TestIsIPAllowed(t *testing.T) {
+	allowedList := []string{
+		"127.0.0.1",
+		"::1",
+		"192.168.1.0/24",
+		"10.0.0.0/8",
+		"2a10:ed40:6:3::/64",
+	}
+
+	tests := []struct {
+		ip       string
+		expected bool
+	}{
+		{"127.0.0.1", true},
+		{"::1", true},
+		{"192.168.1.50", true},
+		{"192.168.2.50", false},
+		{"10.254.1.1", true},
+		{"11.0.0.1", false},
+		{"2a10:ed40:6:3:20c:29ff:fe6b:7325", true},
+		{"2a10:ed40:6:4::1", false},
+		{"invalid-ip", false},
+	}
+
+	for _, tt := range tests {
+		got := isIPAllowed(tt.ip, allowedList)
+		if got != tt.expected {
+			t.Errorf("isIPAllowed(%q) = %v; want %v", tt.ip, got, tt.expected)
+		}
+	}
+}
+
+func TestServerAllowedIPsMiddleware(t *testing.T) {
+	s, h := setupTestServer(t)
+
+	// Configure allowed IPs
+	cfg := h.GetConfig()
+	cfg.Web.AllowedIPs = []string{"192.168.1.100", "10.0.0.0/24"}
+	_ = h.UpdateConfig(&cfg)
+
+	handler := s.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+
+	// 1. Authorized IP
+	reqAllowed := httptest.NewRequest("GET", "/api/status", nil)
+	reqAllowed.RemoteAddr = "192.168.1.100:54321"
+	wAllowed := httptest.NewRecorder()
+	handler.ServeHTTP(wAllowed, reqAllowed)
+	if wAllowed.Code != http.StatusOK {
+		t.Errorf("Expected 200 for allowed IP, got %d", wAllowed.Code)
+	}
+
+	// 2. Authorized CIDR IP
+	reqCIDR := httptest.NewRequest("GET", "/api/status", nil)
+	reqCIDR.RemoteAddr = "10.0.0.55:12345"
+	wCIDR := httptest.NewRecorder()
+	handler.ServeHTTP(wCIDR, reqCIDR)
+	if wCIDR.Code != http.StatusOK {
+		t.Errorf("Expected 200 for allowed CIDR IP, got %d", wCIDR.Code)
+	}
+
+	// 3. Unauthorized IP
+	reqBlocked := httptest.NewRequest("GET", "/api/status", nil)
+	reqBlocked.RemoteAddr = "192.168.1.101:54321"
+	wBlocked := httptest.NewRecorder()
+	handler.ServeHTTP(wBlocked, reqBlocked)
+	if wBlocked.Code != http.StatusForbidden {
+		t.Errorf("Expected 403 Forbidden for unauthorized IP, got %d", wBlocked.Code)
+	}
+}

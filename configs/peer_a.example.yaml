@@ -45,10 +45,19 @@ hunter:
     failure_threshold: 3
 
 web:
-  # Modern web dashboard & configuration settings panel
+  # Modern web dashboard & live telemetry
   enabled: true
   listen_addr: "0.0.0.0:8080"
 
   # Optional HTTP Basic Auth:
   # username: "admin"
   # password: "changeMe123"
+
+  # Restrict web dashboard access to specific client IP addresses or CIDR subnets.
+  # If empty or omitted, all incoming client IPs are permitted.
+  allowed_ips:
+    - "127.0.0.1"
+    - "::1"
+    - "192.168.0.0/16"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"

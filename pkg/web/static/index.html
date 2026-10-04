@@ -41,6 +41,7 @@
           <div class="flow-header-status">
             <div id="tunnelStateBadge" class="status-pill status-unknown">CONNECTING</div>
             <div class="status-reason-text" id="statusReason">Checking interface...</div>
+            <div class="status-timeline-badge" id="statusTimeline">Checking status...</div>
           </div>
         </div>
 
@@ -160,6 +161,14 @@
               <div class="meta-row">
                 <span>Current Status:</span>
                 <strong id="huntAttemptStatus">Idle (Connected)</strong>
+              </div>
+              <div class="meta-row">
+                <span>Connected Since:</span>
+                <strong id="connectedTimestamp">Never</strong>
+              </div>
+              <div class="meta-row">
+                <span>Last Disconnect:</span>
+                <strong id="disconnectedTimestamp">Never</strong>
               </div>
               <div class="meta-row">
                 <span>Last Hunt Trigger:</span>

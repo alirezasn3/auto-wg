@@ -152,6 +152,7 @@ Open `http://<your-server-ip>:8080` in your browser:
 | `web.listen_addr` | string | `0.0.0.0:8080`| Web dashboard listen address |
 | `web.username` | string | `""` | Optional HTTP Basic Auth username |
 | `web.password` | string | `""` | Optional HTTP Basic Auth password |
+| `web.allowed_ips`| list of string| `[]` | Whitelist of client IPs/CIDRs allowed to access panel (e.g. `["127.0.0.1", "192.168.0.0/16"]`). If empty, all IPs allowed |
 
 ---
 

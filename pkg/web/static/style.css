@@ -296,6 +296,21 @@ body {
   color: var(--text-muted);
 }
 
+.status-timeline-badge {
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  color: var(--text-main);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  margin-top: 3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
 /* Flow Stage Layout */
 .flow-stage {
   display: grid;

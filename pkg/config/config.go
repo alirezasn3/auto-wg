@@ -46,10 +46,11 @@ type TunnelPingConfig struct {
 }
 
 type WebConfig struct {
-	Enabled    bool   `yaml:"enabled"`     // Enable web dashboard (default: true)
-	ListenAddr string `yaml:"listen_addr"` // e.g. "0.0.0.0:8080"
-	Username   string `yaml:"username"`    // Optional HTTP Basic Auth
-	Password   string `yaml:"password"`
+	Enabled    bool     `yaml:"enabled"`     // Enable web dashboard (default: true)
+	ListenAddr string   `yaml:"listen_addr"` // e.g. "0.0.0.0:8080"
+	Username   string   `yaml:"username"`    // Optional HTTP Basic Auth
+	Password   string   `yaml:"password"`
+	AllowedIPs []string `yaml:"allowed_ips"` // Whitelist of client IPs or CIDRs (e.g. ["127.0.0.1", "192.168.1.0/24"]). If empty, all IPs allowed.
 }
 
 // LoadConfig reads and parses configuration from a YAML file.

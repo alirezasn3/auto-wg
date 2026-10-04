@@ -25,6 +25,7 @@ class AutoWGApp {
     // Hero 5-Tuple Elements
     this.stateBadge = document.getElementById('tunnelStateBadge');
     this.statusReason = document.getElementById('statusReason');
+    this.statusTimeline = document.getElementById('statusTimeline');
     this.wgInterface = document.getElementById('wgInterface');
     this.localPort = document.getElementById('localPort');
     this.localPortRange = document.getElementById('localPortRange');
@@ -44,6 +45,8 @@ class AutoWGApp {
     // Telemetry Grid Elements
     this.huntRecoverySummary = document.getElementById('huntRecoverySummary');
     this.huntAttemptStatus = document.getElementById('huntAttemptStatus');
+    this.connectedTimestamp = document.getElementById('connectedTimestamp');
+    this.disconnectedTimestamp = document.getElementById('disconnectedTimestamp');
     this.lastHuntReason = document.getElementById('lastHuntReason');
     this.lastHuntTime = document.getElementById('lastHuntTime');
 
@@ -230,6 +233,37 @@ class AutoWGApp {
         this.lastHandshake.textContent = `${Math.floor(totalAge / 60)}m ${totalAge % 60}s ago`;
       }
     }
+    this.renderTimestamps(this.currentData);
+  }
+
+  renderTimestamps(data) {
+    if (!data) return;
+    const state = data.state || 'UNKNOWN';
+
+    if (this.statusTimeline) {
+      if (state === 'CONNECTED') {
+        if (data.last_connected_at && !data.last_connected_at.startsWith('0001')) {
+          this.statusTimeline.innerHTML = `🟢 <strong>Connected:</strong> ${formatTimestampAndAgo(data.last_connected_at)}`;
+        } else {
+          this.statusTimeline.innerHTML = `🟢 <strong>Connected</strong>`;
+        }
+      } else if (state === 'HUNTING' || state === 'STALLED') {
+        if (data.last_disconnected_at && !data.last_disconnected_at.startsWith('0001')) {
+          this.statusTimeline.innerHTML = `🔴 <strong>Disconnected:</strong> ${formatTimestampAndAgo(data.last_disconnected_at)}`;
+        } else {
+          this.statusTimeline.innerHTML = `🔴 <strong>Link Down / Hunting</strong>`;
+        }
+      } else {
+        this.statusTimeline.innerHTML = `⚪ Checking status...`;
+      }
+    }
+
+    if (this.connectedTimestamp) {
+      this.connectedTimestamp.textContent = formatTimestampAndAgo(data.last_connected_at);
+    }
+    if (this.disconnectedTimestamp) {
+      this.disconnectedTimestamp.textContent = formatTimestampAndAgo(data.last_disconnected_at);
+    }
   }
 
   renderStatus(data) {
@@ -247,6 +281,8 @@ class AutoWGApp {
     } else {
       this.statusReason.textContent = 'Waiting for interface...';
     }
+
+    this.renderTimestamps(data);
 
     // 2. Local Node
     this.wgInterface.textContent = data.interface || 'wg0';
@@ -469,6 +505,28 @@ function formatBytes(bytes) {
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + sizes[i];
+}
+
+function formatTimestampAndAgo(isoString) {
+  if (!isoString || isoString.startsWith('0001') || isoString === '') {
+    return 'Never';
+  }
+  const date = new Date(isoString);
+  const now = Date.now();
+  const diffSec = Math.max(0, Math.round((now - date.getTime()) / 1000));
+  const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  if (diffSec < 60) {
+    return `${diffSec}s ago (${timeStr})`;
+  }
+  if (diffSec < 3600) {
+    const mins = Math.floor(diffSec / 60);
+    const secs = diffSec % 60;
+    return `${mins}m ${secs}s ago (${timeStr})`;
+  }
+  const hours = Math.floor(diffSec / 3600);
+  const mins = Math.floor((diffSec % 3600) / 60);
+  return `${hours}h ${mins}m ago (${timeStr})`;
 }
 
 function escapeHtml(str) {

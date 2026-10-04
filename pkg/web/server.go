@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"auto-wg/pkg/config"
@@ -82,6 +84,18 @@ func (s *Server) Stop(ctx context.Context) error {
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.hunter.GetConfig()
+
+		// 1. Client IP Whitelist check
+		if len(cfg.Web.AllowedIPs) > 0 {
+			clientIP := extractClientIP(r)
+			if !isIPAllowed(clientIP, cfg.Web.AllowedIPs) {
+				s.log.Warn("WEB", "Access denied: client IP %s is not in web.allowed_ips", clientIP)
+				http.Error(w, "Forbidden: IP not authorized", http.StatusForbidden)
+				return
+			}
+		}
+
+		// 2. HTTP Basic Auth check
 		if cfg.Web.Username != "" && cfg.Web.Password != "" {
 			u, p, ok := r.BasicAuth()
 			if !ok || u != cfg.Web.Username || p != cfg.Web.Password {
@@ -92,6 +106,41 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func extractClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	return strings.TrimSpace(host)
+}
+
+func isIPAllowed(clientIPStr string, allowedList []string) bool {
+	parsedIP := net.ParseIP(clientIPStr)
+	if parsedIP == nil {
+		return false
+	}
+
+	for _, entry := range allowedList {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+
+		if strings.Contains(entry, "/") {
+			_, ipNet, err := net.ParseCIDR(entry)
+			if err == nil && ipNet.Contains(parsedIP) {
+				return true
+			}
+		} else {
+			entryIP := net.ParseIP(entry)
+			if entryIP != nil && entryIP.Equal(parsedIP) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

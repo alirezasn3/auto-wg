@@ -36,6 +36,8 @@ type StatusReport struct {
 	LastHandshake      time.Time     `json:"last_handshake"`
 	HandshakeAge       time.Duration `json:"handshake_age"`
 	HandshakeAgeSec    float64       `json:"handshake_age_seconds"`
+	LastConnectedAt    time.Time     `json:"last_connected_at"`
+	LastDisconnectedAt time.Time     `json:"last_disconnected_at"`
 	TransmitBytes      int64         `json:"transmit_bytes"`
 	ReceiveBytes       int64         `json:"receive_bytes"`
 	TotalHunts         int64         `json:"total_hunts"`
@@ -59,26 +61,28 @@ type Hunter struct {
 	mu         sync.RWMutex
 
 	// Live state
-	state           string
-	localPubKey     string
-	peerPubKey      string
-	targetIP        string
-	pingTarget      string
-	localPort       int
-	remotePort      int
-	lastHandshake   time.Time
-	handshakeAge    time.Duration
-	txBytes         int64
-	rxBytes         int64
-	lastRxBytes     int64
-	failedPings     int
-	totalHunts      int64
-	successfulHunts int64
-	currentAttempt  int
-	lastHuntTime    time.Time
-	lastHuntReason  string
-	iptablesActive  bool
-	manualTrigger   chan string
+	state              string
+	localPubKey        string
+	peerPubKey         string
+	targetIP           string
+	pingTarget         string
+	localPort          int
+	remotePort         int
+	lastHandshake      time.Time
+	handshakeAge       time.Duration
+	lastConnectedAt    time.Time
+	lastDisconnectedAt time.Time
+	txBytes            int64
+	rxBytes            int64
+	lastRxBytes        int64
+	failedPings        int
+	totalHunts         int64
+	successfulHunts    int64
+	currentAttempt     int
+	lastHuntTime       time.Time
+	lastHuntReason     string
+	iptablesActive     bool
+	manualTrigger      chan string
 }
 
 func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *iptables.Manager, log *logger.Logger) *Hunter {
@@ -222,6 +226,13 @@ func (h *Hunter) tick(ctx context.Context) {
 			h.log.Info("HUNTER", "===============================================================")
 			h.successfulHunts++
 			h.currentAttempt = 0
+			h.lastConnectedAt = time.Now()
+		} else if h.lastConnectedAt.IsZero() {
+			if !dev.LastHandshake.IsZero() {
+				h.lastConnectedAt = dev.LastHandshake
+			} else {
+				h.lastConnectedAt = time.Now()
+			}
 		}
 		h.state = StateConnected
 		h.failedPings = 0
@@ -248,6 +259,9 @@ func (h *Hunter) tick(ctx context.Context) {
 				h.log.Info("HUNTER", "===============================================================")
 				h.successfulHunts++
 				h.currentAttempt = 0
+				h.lastConnectedAt = time.Now()
+			} else if h.lastConnectedAt.IsZero() {
+				h.lastConnectedAt = time.Now()
 			}
 			h.state = StateConnected
 			h.mu.Unlock()
@@ -261,6 +275,9 @@ func (h *Hunter) tick(ctx context.Context) {
 
 		if h.failedPings < threshold {
 			// In grace verification period, do not hunt yet!
+			if h.state == StateConnected {
+				h.lastDisconnectedAt = time.Now()
+			}
 			h.state = StateStalled
 			h.lastHuntReason = fmt.Sprintf("verifying_stalled_ping_%d/%d", h.failedPings, threshold)
 			h.mu.Unlock()
@@ -269,6 +286,9 @@ func (h *Hunter) tick(ctx context.Context) {
 	}
 
 	// 4. Link is confirmed dead (failed pings reached threshold, or ping disabled)!
+	if h.state == StateConnected {
+		h.lastDisconnectedAt = time.Now()
+	}
 	h.state = StateHunting
 	attempt := h.currentAttempt
 	stallReason := "handshake_expired"
@@ -487,6 +507,8 @@ func (h *Hunter) GetStatus() StatusReport {
 		LastHandshake:      h.lastHandshake,
 		HandshakeAge:       h.handshakeAge,
 		HandshakeAgeSec:    hsAgeSec,
+		LastConnectedAt:    h.lastConnectedAt,
+		LastDisconnectedAt: h.lastDisconnectedAt,
 		TransmitBytes:      h.txBytes,
 		ReceiveBytes:       h.rxBytes,
 		TotalHunts:         h.totalHunts,
