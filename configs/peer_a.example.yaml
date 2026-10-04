@@ -38,9 +38,9 @@ hunter:
   cycle_timeout: 8s
 
   # Active in-tunnel ICMP ping verification before hunting
-  # Note: Target IP is automatically derived from the peer's AllowedIPs on wg0
   tunnel_ping:
     enabled: true
+    target_ip: "10.0.0.2" # In-tunnel IP of the remote peer to ping
     interval: 2s
     failure_threshold: 3
 

@@ -66,4 +66,14 @@ func TestHunterStatusReportAndConfigUpdate(t *testing.T) {
 	if readBack.Hunter.HandshakeTimeout != 40*time.Second {
 		t.Errorf("Expected updated timeout 40s, got %v", readBack.Hunter.HandshakeTimeout)
 	}
+
+	newCfg.Hunter.TunnelPing.TargetIP = "10.0.0.5"
+	if err := h.UpdateConfig(&newCfg); err != nil {
+		t.Fatalf("UpdateConfig with TargetIP failed: %v", err)
+	}
+
+	readBack = h.GetConfig()
+	if readBack.Hunter.TunnelPing.TargetIP != "10.0.0.5" {
+		t.Errorf("Expected updated TargetIP 10.0.0.5, got %s", readBack.Hunter.TunnelPing.TargetIP)
+	}
 }

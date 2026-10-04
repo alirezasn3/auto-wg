@@ -196,9 +196,11 @@ func (h *Hunter) tick(ctx context.Context) {
 	rxProgress := dev.ReceiveBytes > h.lastRxBytes && h.lastRxBytes > 0
 	h.lastRxBytes = dev.ReceiveBytes
 
-	// Determine in-tunnel ping target strictly from peer's AllowedIPs
-	var pingTarget string
-	if len(dev.PeerAllowedIPs) > 0 {
+	// Determine in-tunnel ping target:
+	// Priority 1: Manually configured target_ip in config
+	// Priority 2: Fallback to peer's AllowedIPs from WireGuard interface
+	pingTarget := strings.TrimSpace(h.cfg.Hunter.TunnelPing.TargetIP)
+	if pingTarget == "" && len(dev.PeerAllowedIPs) > 0 {
 		pingTarget = dev.PeerAllowedIPs[0]
 	}
 	h.pingTarget = pingTarget

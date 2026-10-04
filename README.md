@@ -147,7 +147,8 @@ Open `http://<your-server-ip>:8080` in your browser:
 | `hunter.handshake_timeout`| duration| `60s` | Stale handshake threshold to trigger ping check |
 | `hunter.cycle_timeout` | duration| `8s` | Alternating stagger window to prevent peer collision |
 | `hunter.tunnel_ping.enabled` | bool | `true` | Active ICMP ping verification before hunting |
-| `hunter.tunnel_ping.failure_threshold` | int | `3` | Consecutive ping timeouts before hunting (target IP is auto-derived from peer `AllowedIPs`) |
+| `hunter.tunnel_ping.target_ip` | string | `""` | Remote peer's in-tunnel IP to ping (e.g. `10.0.0.1`). Auto-derived from `AllowedIPs` if omitted |
+| `hunter.tunnel_ping.failure_threshold` | int | `3` | Consecutive ping timeouts before hunting |
 | `web.enabled` | bool | `true` | Enable built-in web dashboard |
 | `web.listen_addr` | string | `0.0.0.0:8080`| Web dashboard listen address |
 | `web.username` | string | `""` | Optional HTTP Basic Auth username |
