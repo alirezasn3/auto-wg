@@ -1,4 +1,4 @@
-// Auto-WG Dashboard & Settings Application
+// Auto-WG Modernized Dashboard Application
 
 class AutoWGApp {
   constructor() {
@@ -6,37 +6,57 @@ class AutoWGApp {
     this.autoScroll = true;
     this.eventSource = null;
     this.statusTimer = null;
+    this.currentData = null;
+    this.lastPollTimestamp = Date.now();
 
     this.initElements();
     this.initTabs();
     this.initActions();
-    this.initSettings();
+    this.initCopyButtons();
     this.initLogControls();
     this.startStatusPolling();
     this.connectLogStream();
-    this.loadSettings();
   }
 
   initElements() {
     // Header & Clock
     this.serverClock = document.getElementById('serverClock');
 
-    // Telemetry Elements
+    // Hero 5-Tuple Elements
     this.stateBadge = document.getElementById('tunnelStateBadge');
     this.statusReason = document.getElementById('statusReason');
     this.wgInterface = document.getElementById('wgInterface');
-    this.lastHandshake = document.getElementById('lastHandshake');
-    this.staggerRole = document.getElementById('staggerRole');
     this.localPort = document.getElementById('localPort');
-    this.remoteEndpoint = document.getElementById('remoteEndpoint');
-    this.transferStats = document.getElementById('transferStats');
-    this.portRangeSummary = document.getElementById('portRangeSummary');
-    this.targetIP = document.getElementById('targetIP');
-    this.peerPubKey = document.getElementById('peerPubKey');
+    this.localPortRange = document.getElementById('localPortRange');
     this.localPubKey = document.getElementById('localPubKey');
+
+    this.lastHandshake = document.getElementById('lastHandshake');
     this.pingStatus = document.getElementById('pingStatus');
-    this.iptablesBadge = document.getElementById('iptablesStatusBadge');
-    this.huntStats = document.getElementById('huntStats');
+    this.rxTransfer = document.getElementById('rxTransfer');
+    this.txTransfer = document.getElementById('txTransfer');
+
+    this.staggerRole = document.getElementById('staggerRole');
+    this.targetIP = document.getElementById('targetIP');
+    this.remotePort = document.getElementById('remotePort');
+    this.remotePortRange = document.getElementById('remotePortRange');
+    this.peerPubKey = document.getElementById('peerPubKey');
+
+    // Telemetry Grid Elements
+    this.huntRecoverySummary = document.getElementById('huntRecoverySummary');
+    this.huntAttemptStatus = document.getElementById('huntAttemptStatus');
+    this.lastHuntReason = document.getElementById('lastHuntReason');
+    this.lastHuntTime = document.getElementById('lastHuntTime');
+
+    this.iptablesStateText = document.getElementById('iptablesStateText');
+    this.iptablesSubtext = document.getElementById('iptablesSubtext');
+    this.iptablesRange = document.getElementById('iptablesRange');
+    this.tunnelPingTarget = document.getElementById('tunnelPingTarget');
+    this.failedPingsCount = document.getElementById('failedPingsCount');
+
+    this.totalRx = document.getElementById('totalRx');
+    this.totalTx = document.getElementById('totalTx');
+    this.ifaceState = document.getElementById('ifaceState');
+    this.staggerRoleDetail = document.getElementById('staggerRoleDetail');
 
     // Logs & Terminal
     this.terminal = document.getElementById('terminal');
@@ -49,6 +69,7 @@ class AutoWGApp {
     this.filterSearch = document.getElementById('filterSearch');
     this.btnAutoScroll = document.getElementById('btnAutoScroll');
     this.btnClearLogs = document.getElementById('btnClearLogs');
+    this.btnGoToLogs = document.getElementById('btnGoToLogs');
 
     // Action Buttons
     this.btnRebind = document.getElementById('btnRebind');
@@ -62,21 +83,39 @@ class AutoWGApp {
     const tabs = document.querySelectorAll('.nav-tab');
     tabs.forEach(tab => {
       tab.addEventListener('click', () => {
-        tabs.forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-
-        tab.classList.add('active');
         const tabId = tab.getAttribute('data-tab');
-        const content = document.getElementById(`tab-${tabId}`);
-        if (content) {
-          content.classList.add('active');
-        }
-
-        if (tabId === 'settings') {
-          this.loadSettings();
-        }
+        this.switchTab(tabId);
       });
     });
+
+    if (this.btnGoToLogs) {
+      this.btnGoToLogs.addEventListener('click', () => {
+        this.switchTab('logs');
+      });
+    }
+  }
+
+  switchTab(tabId) {
+    const tabs = document.querySelectorAll('.nav-tab');
+    tabs.forEach(t => {
+      if (t.getAttribute('data-tab') === tabId) {
+        t.classList.add('active');
+      } else {
+        t.classList.remove('active');
+      }
+    });
+
+    document.querySelectorAll('.tab-content').forEach(c => {
+      if (c.id === `tab-${tabId}`) {
+        c.classList.add('active');
+      } else {
+        c.classList.remove('active');
+      }
+    });
+
+    if (tabId === 'logs' && this.autoScroll && this.terminal) {
+      this.terminal.scrollTop = this.terminal.scrollHeight;
+    }
   }
 
   showToast(message, isError = false) {
@@ -85,7 +124,36 @@ class AutoWGApp {
     this.toast.className = isError ? 'toast error' : 'toast';
     setTimeout(() => {
       this.toast.className = 'toast hidden';
-    }, 3500);
+    }, 3000);
+  }
+
+  initCopyButtons() {
+    const setupCopy = (btnId, textGetter, label) => {
+      const btn = document.getElementById(btnId);
+      if (!btn) return;
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const text = textGetter();
+        if (!text || text === '--' || text.includes('Auto-')) return;
+        try {
+          await navigator.clipboard.writeText(text);
+          this.showToast(`✓ Copied ${label} to clipboard!`);
+        } catch {
+          // Fallback
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          this.showToast(`✓ Copied ${label} to clipboard!`);
+        }
+      });
+    };
+
+    setupCopy('btnCopyLocalKey', () => this.currentData?.local_public_key || '', 'Local Key');
+    setupCopy('btnCopyPeerKey', () => this.currentData?.peer_public_key || '', 'Peer Key');
+    setupCopy('btnCopyTargetIP', () => this.currentData?.target_ip || '', 'Target IP');
   }
 
   initActions() {
@@ -95,13 +163,14 @@ class AutoWGApp {
         const res = await fetch('/api/actions/rebind', { method: 'POST' });
         if (res.ok) {
           this.showToast('⚡ Local source port rebind initiated');
+          this.pollStatus();
         } else {
           this.showToast('Failed to trigger rebind', true);
         }
       } catch (err) {
         this.showToast('Network error: ' + err.message, true);
       } finally {
-        setTimeout(() => { this.btnRebind.disabled = false; }, 1000);
+        setTimeout(() => { this.btnRebind.disabled = false; }, 1200);
       }
     });
 
@@ -111,104 +180,14 @@ class AutoWGApp {
         const res = await fetch('/api/actions/hunt', { method: 'POST' });
         if (res.ok) {
           this.showToast('🔄 5-Tuple port hunt initiated');
+          this.pollStatus();
         } else {
           this.showToast('Failed to trigger port hunt', true);
         }
       } catch (err) {
         this.showToast('Network error: ' + err.message, true);
       } finally {
-        setTimeout(() => { this.btnHunt.disabled = false; }, 1000);
-      }
-    });
-  }
-
-  async loadSettings() {
-    try {
-      const res = await fetch('/api/config');
-      if (!res.ok) return;
-      const cfg = await res.json();
-
-      document.getElementById('cfgInterface').value = cfg.wireguard?.interface || 'wg0';
-      document.getElementById('cfgMode').value = cfg.wireguard?.mode || 'wgctrl';
-      document.getElementById('cfgCommand').value = cfg.wireguard?.command || 'wg';
-
-      document.getElementById('cfgIptablesEnabled').checked = cfg.iptables?.enabled !== false;
-      document.getElementById('cfgLocalPortRange').value = cfg.iptables?.port_range || '20000-30000';
-
-      document.getElementById('cfgRemotePortRange').value = cfg.hunter?.remote_port_range || '20000-30000';
-      document.getElementById('cfgHandshakeTimeout').value = formatDuration(cfg.hunter?.handshake_timeout) || '60s';
-      document.getElementById('cfgCheckInterval').value = formatDuration(cfg.hunter?.check_interval) || '3s';
-      document.getElementById('cfgCycleTimeout').value = formatDuration(cfg.hunter?.cycle_timeout) || '8s';
-      document.getElementById('cfgPingThreshold').value = cfg.hunter?.tunnel_ping?.failure_threshold || 3;
-
-      document.getElementById('cfgWebListen').value = cfg.web?.listen_addr || '0.0.0.0:8080';
-      document.getElementById('cfgWebUsername').value = cfg.web?.username || '';
-      document.getElementById('cfgWebPassword').value = cfg.web?.password || '';
-    } catch (err) {
-      console.error('Failed to load settings:', err);
-    }
-  }
-
-  initSettings() {
-    const form = document.getElementById('settingsForm');
-    const saveStatus = document.getElementById('saveStatus');
-
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      saveStatus.textContent = 'Saving...';
-      saveStatus.style.color = 'var(--accent)';
-
-      const payload = {
-        wireguard: {
-          interface: document.getElementById('cfgInterface').value.trim(),
-          mode: document.getElementById('cfgMode').value,
-          command: document.getElementById('cfgCommand').value
-        },
-        iptables: {
-          enabled: document.getElementById('cfgIptablesEnabled').checked,
-          port_range: document.getElementById('cfgLocalPortRange').value.trim()
-        },
-        hunter: {
-          remote_port_range: document.getElementById('cfgRemotePortRange').value.trim(),
-          handshake_timeout: parseDuration(document.getElementById('cfgHandshakeTimeout').value),
-          check_interval: parseDuration(document.getElementById('cfgCheckInterval').value),
-          cycle_timeout: parseDuration(document.getElementById('cfgCycleTimeout').value),
-          tunnel_ping: {
-            enabled: true,
-            failure_threshold: parseInt(document.getElementById('cfgPingThreshold').value) || 3
-          }
-        },
-        web: {
-          enabled: true,
-          listen_addr: document.getElementById('cfgWebListen').value.trim(),
-          username: document.getElementById('cfgWebUsername').value.trim(),
-          password: document.getElementById('cfgWebPassword').value.trim()
-        }
-      };
-
-      try {
-        const res = await fetch('/api/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-
-        if (res.ok) {
-          saveStatus.textContent = '✓ Saved and applied!';
-          saveStatus.style.color = 'var(--success)';
-          this.showToast('Settings saved to config.yaml and applied live!');
-        } else {
-          const errText = await res.text();
-          saveStatus.textContent = '✗ ' + errText;
-          saveStatus.style.color = 'var(--danger)';
-          this.showToast('Save failed: ' + errText, true);
-        }
-      } catch (err) {
-        saveStatus.textContent = '✗ ' + err.message;
-        saveStatus.style.color = 'var(--danger)';
-        this.showToast('Error: ' + err.message, true);
-      } finally {
-        setTimeout(() => { saveStatus.textContent = ''; }, 4000);
+        setTimeout(() => { this.btnHunt.disabled = false; }, 1200);
       }
     });
   }
@@ -216,6 +195,14 @@ class AutoWGApp {
   startStatusPolling() {
     this.pollStatus();
     this.statusTimer = setInterval(() => this.pollStatus(), 2000);
+
+    // Live clock & live handshake increment
+    setInterval(() => {
+      if (this.serverClock) {
+        this.serverClock.textContent = new Date().toLocaleTimeString();
+      }
+      this.updateLiveHandshakeAge();
+    }, 1000);
   }
 
   async pollStatus() {
@@ -223,17 +210,30 @@ class AutoWGApp {
       const res = await fetch('/api/status');
       if (!res.ok) return;
       const data = await res.json();
+      this.currentData = data;
+      this.lastPollTimestamp = Date.now();
       this.renderStatus(data);
     } catch (err) {
       console.warn('Status poll error:', err);
     }
   }
 
-  renderStatus(data) {
-    // Clock
-    this.serverClock.textContent = new Date().toLocaleTimeString();
+  updateLiveHandshakeAge() {
+    if (!this.currentData || !this.lastHandshake) return;
+    const baseAge = this.currentData.handshake_age_seconds;
+    if (baseAge !== undefined && baseAge > 0) {
+      const elapsed = Math.round((Date.now() - this.lastPollTimestamp) / 1000);
+      const totalAge = Math.round(baseAge + elapsed);
+      if (totalAge < 60) {
+        this.lastHandshake.textContent = `${totalAge}s ago`;
+      } else {
+        this.lastHandshake.textContent = `${Math.floor(totalAge / 60)}m ${totalAge % 60}s ago`;
+      }
+    }
+  }
 
-    // State Badge
+  renderStatus(data) {
+    // 1. Status Pill & Reason
     const state = data.state || 'UNKNOWN';
     this.stateBadge.textContent = state;
     this.stateBadge.className = 'status-pill status-' + state.toLowerCase();
@@ -243,84 +243,97 @@ class AutoWGApp {
     } else if (state === 'HUNTING') {
       this.statusReason.textContent = `Hunting ports (Attempt #${data.current_attempt || 1})`;
     } else if (state === 'STALLED') {
-      this.statusReason.textContent = data.last_hunt_reason || 'Handshake stalled';
+      this.statusReason.textContent = data.last_hunt_reason || 'Handshake stalled; verifying';
     } else {
       this.statusReason.textContent = 'Waiting for interface...';
     }
 
-    // Interface & Handshake
-    this.wgInterface.textContent = data.interface || '-';
+    // 2. Local Node
+    this.wgInterface.textContent = data.interface || 'wg0';
+    this.localPort.textContent = data.local_port > 0 ? `:${data.local_port}` : '--';
+    this.localPortRange.textContent = data.local_port_range || '--';
+    this.localPubKey.textContent = data.local_public_key || '--';
+    this.localPubKey.title = data.local_public_key || '';
 
-    if (data.handshake_age_seconds !== undefined && data.handshake_age_seconds > 0) {
-      const age = Math.round(data.handshake_age_seconds);
-      if (age < 60) {
-        this.lastHandshake.textContent = `${age}s ago`;
-      } else {
-        this.lastHandshake.textContent = `${Math.floor(age / 60)}m ${age % 60}s ago`;
-      }
-    } else {
+    // 3. Center Bridge
+    this.updateLiveHandshakeAge();
+    if (data.handshake_age_seconds === undefined || data.handshake_age_seconds <= 0) {
       this.lastHandshake.textContent = 'Never / Waiting';
     }
 
-    this.staggerRole.textContent = data.is_primary ? 'Primary (Cycle 0)' : 'Secondary (Cycle 1)';
-
-    // Flow
-    this.localPort.textContent = data.local_port > 0 ? `:${data.local_port}` : '-';
-    if (data.target_ip && data.remote_port) {
-      const isIPv6 = data.target_ip.includes(':');
-      if (isIPv6) {
-        this.remoteEndpoint.innerHTML = `<span class="endpoint-ip" title="[${data.target_ip}]:${data.remote_port}">[${data.target_ip}]</span><span class="endpoint-port">:${data.remote_port}</span>`;
-        this.remoteEndpoint.classList.add('endpoint-ipv6');
+    if (data.in_tunnel_ping_target) {
+      if (data.failed_pings > 0) {
+        this.pingStatus.textContent = `${data.in_tunnel_ping_target} (Retry #${data.failed_pings})`;
+        this.pingStatus.style.color = 'var(--warning)';
       } else {
-        this.remoteEndpoint.textContent = `${data.target_ip}:${data.remote_port}`;
-        this.remoteEndpoint.classList.remove('endpoint-ipv6');
+        this.pingStatus.textContent = `${data.in_tunnel_ping_target} (OK)`;
+        this.pingStatus.style.color = 'var(--success)';
       }
     } else {
-      this.remoteEndpoint.textContent = '-';
-      this.remoteEndpoint.classList.remove('endpoint-ipv6');
+      this.pingStatus.textContent = 'Auto-detecting...';
+      this.pingStatus.style.color = 'var(--text-muted)';
     }
 
-    // Transfer
-    this.transferStats.textContent = `${formatBytes(data.receive_bytes)} / ${formatBytes(data.transmit_bytes)}`;
+    this.rxTransfer.textContent = formatBytes(data.receive_bytes);
+    this.txTransfer.textContent = formatBytes(data.transmit_bytes);
 
-    // Port Range Summary
-    this.portRangeSummary.textContent = `Local: ${data.local_port_range || '-'} | Remote: ${data.remote_port_range || '-'}`;
-
-    // Target IP & Keys
-    if (data.target_ip) {
-      this.targetIP.textContent = data.target_ip;
-      this.targetIP.title = data.target_ip;
-    } else {
-      this.targetIP.textContent = 'Auto-discovering...';
-      this.targetIP.removeAttribute('title');
-    }
+    // 4. Remote Node
+    this.staggerRole.textContent = data.is_primary ? 'Primary Peer' : 'Secondary Peer';
+    this.targetIP.textContent = data.target_ip || 'Auto-discovering...';
+    this.targetIP.title = data.target_ip || '';
+    this.remotePort.textContent = data.remote_port > 0 ? `:${data.remote_port}` : '--';
+    this.remotePortRange.textContent = data.remote_port_range || '--';
     this.peerPubKey.textContent = data.peer_public_key || 'Auto-discovering...';
-    this.localPubKey.textContent = data.local_public_key || '-';
+    this.peerPubKey.title = data.peer_public_key || '';
 
-    // In-tunnel Ping Status
-    if (this.pingStatus) {
-      if (data.in_tunnel_ping_target) {
-        if (data.failed_pings > 0) {
-          this.pingStatus.textContent = `${data.in_tunnel_ping_target} (Retrying ${data.failed_pings})`;
-        } else {
-          this.pingStatus.textContent = `${data.in_tunnel_ping_target} (Verified OK)`;
-        }
-      } else {
-        this.pingStatus.textContent = 'Auto-detecting...';
-      }
-    }
+    // 5. Telemetry Cards
+    this.huntRecoverySummary.textContent = `${data.successful_hunts || 0} / ${data.total_hunts || 0}`;
 
-    // iptables Status
-    if (data.iptables_active) {
-      this.iptablesBadge.textContent = `ACTIVE (${data.local_port_range})`;
-      this.iptablesBadge.className = 'badge-active';
+    if (data.current_attempt > 0) {
+      this.huntAttemptStatus.textContent = `Hunting (Attempt #${data.current_attempt})`;
+      this.huntAttemptStatus.style.color = 'var(--accent)';
+    } else if (state === 'CONNECTED') {
+      this.huntAttemptStatus.textContent = 'Idle (Connected)';
+      this.huntAttemptStatus.style.color = 'var(--success)';
     } else {
-      this.iptablesBadge.textContent = 'OFF / Non-Linux';
-      this.iptablesBadge.className = 'badge-neutral';
+      this.huntAttemptStatus.textContent = state;
+      this.huntAttemptStatus.style.color = 'var(--text-main)';
     }
 
-    // Hunt Stats
-    this.huntStats.textContent = `${data.total_hunts || 0} hunts (${data.successful_hunts || 0} recovered)`;
+    this.lastHuntReason.textContent = data.last_hunt_reason || 'None';
+    this.lastHuntReason.title = data.last_hunt_reason || 'None';
+
+    if (data.last_hunt_time && !data.last_hunt_time.startsWith('0001')) {
+      const huntDate = new Date(data.last_hunt_time);
+      const agoSec = Math.round((Date.now() - huntDate.getTime()) / 1000);
+      if (agoSec < 60) {
+        this.lastHuntTime.textContent = `${agoSec}s ago`;
+      } else {
+        this.lastHuntTime.textContent = `${Math.floor(agoSec / 60)}m ago`;
+      }
+    } else {
+      this.lastHuntTime.textContent = 'Never';
+    }
+
+    // iptables Card
+    if (data.iptables_active) {
+      this.iptablesStateText.textContent = 'ACTIVE';
+      this.iptablesStateText.style.color = 'var(--success)';
+      this.iptablesSubtext.textContent = `REDIRECT -> :${data.local_port || '...'}`;
+    } else {
+      this.iptablesStateText.textContent = 'OFF';
+      this.iptablesStateText.style.color = 'var(--text-muted)';
+      this.iptablesSubtext.textContent = 'Disabled / Non-Linux';
+    }
+    this.iptablesRange.textContent = data.local_port_range || '--';
+    this.tunnelPingTarget.textContent = data.in_tunnel_ping_target || 'Auto-detecting...';
+    this.failedPingsCount.textContent = `${data.failed_pings || 0} consecutive`;
+
+    // Traffic Card
+    this.totalRx.textContent = formatBytes(data.receive_bytes);
+    this.totalTx.textContent = formatBytes(data.transmit_bytes);
+    this.ifaceState.textContent = state === 'CONNECTED' ? 'ACTIVE (UP)' : 'MONITORING';
+    this.staggerRoleDetail.textContent = data.is_primary ? 'Primary (Cycle 0)' : 'Secondary (Cycle 1)';
   }
 
   connectLogStream() {
@@ -349,7 +362,7 @@ class AutoWGApp {
     };
 
     this.eventSource.onerror = () => {
-      this.streamStatus.textContent = '● Stream Disconnected (Retrying...)';
+      this.streamStatus.textContent = '● Stream Disconnected';
       this.streamStatus.style.color = 'var(--danger)';
       if (this.streamStatusMini) {
         this.streamStatusMini.textContent = '● Offline';
@@ -367,7 +380,7 @@ class AutoWGApp {
     this.renderLogItem(entry, this.logContainer);
     if (this.miniLogContainer) {
       this.renderLogItem(entry, this.miniLogContainer);
-      if (this.miniLogContainer.children.length > 10) {
+      if (this.miniLogContainer.children.length > 12) {
         this.miniLogContainer.removeChild(this.miniLogContainer.firstChild);
       }
       this.miniLogContainer.scrollTop = this.miniLogContainer.scrollHeight;
@@ -438,7 +451,7 @@ class AutoWGApp {
     this.btnAutoScroll?.addEventListener('click', () => {
       this.autoScroll = !this.autoScroll;
       this.btnAutoScroll.textContent = `Auto-scroll: ${this.autoScroll ? 'ON' : 'OFF'}`;
-      this.btnAutoScroll.className = `btn btn-sm ${this.autoScroll ? 'btn-active' : ''}`;
+      this.btnAutoScroll.className = `btn btn-sm ${this.autoScroll ? 'btn-active' : 'btn-secondary'}`;
     });
 
     this.btnClearLogs?.addEventListener('click', () => {
@@ -456,27 +469,6 @@ function formatBytes(bytes) {
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + sizes[i];
-}
-
-function formatDuration(ns) {
-  if (!ns) return '';
-  const seconds = ns / 1e9;
-  return `${seconds}s`;
-}
-
-function parseDuration(str) {
-  if (!str) return 3e9;
-  str = str.trim().toLowerCase();
-  if (str.endsWith('s')) {
-    const sec = parseFloat(str.replace('s', ''));
-    return Math.round(sec * 1e9);
-  }
-  if (str.endsWith('m')) {
-    const min = parseFloat(str.replace('m', ''));
-    return Math.round(min * 60 * 1e9);
-  }
-  const val = parseFloat(str);
-  return Math.round(val * 1e9);
 }
 
 function escapeHtml(str) {

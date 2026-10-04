@@ -13,7 +13,7 @@ By combining **autonomous symmetrical hunting** with **kernel-level `iptables` p
 * **Auto-Discovery of Peer Key & Target IP**: Neither `peer_public_key` nor `target_ip` is needed in `config.yaml`. Auto-WG queries the WireGuard interface (e.g. `wg0`) and automatically extracts the single peer's public key, current endpoint, and handshake statistics.
 * **Client Source-Port Busting**: DPI often detects the WireGuard handshake and blacklists the client's source port. Auto-WG dynamically rotates both local `ListenPort` and remote `Endpoint` port, creating a fresh 5-tuple `(src_ip, new_src_port, dst_ip, new_dst_port, UDP)` to reset DPI filters.
 * **Deterministic Anti-Collision Staggering**: Uses public key lexicographical comparison (`localPubKey < peerPubKey`) to coordinate turn-taking windows (e.g. 8s cycle) so peers do not collide or flap while hunting.
-* **Integrated Web Dashboard & Settings Panel**: Built-in modern web UI with live telemetry, handshake tracking, 5-tuple flow visualization, manual hunt triggers, live streaming logs (SSE), and a settings tab to modify and persist configuration live without restarting the daemon.
+* **Integrated Web Dashboard**: Built-in modern, mobile-responsive web UI with live telemetry, handshake tracking, 5-tuple flow visualization, manual hunt triggers, and live streaming logs (SSE).
 * **Standard WireGuard & AmneziaWG**: Works natively via `wgctrl` (Netlink / UAPI) and supports CLI mode (`wg` or `awg` for AmneziaWG obfuscated setups).
 
 ---
@@ -128,9 +128,8 @@ sudo ./autowg --uninstall
 ### 4. Access Web Dashboard
 
 Open `http://<your-server-ip>:8080` in your browser:
-* **Dashboard Tab**: View live connection health, handshake age, transfer stats, current 5-tuple ports (with full IPv4/IPv6 support), and trigger manual port rebinds or hunts.
-* **Settings Tab**: Update port ranges, timeout intervals, interface names, or credentials directly from the web browser and apply them live without restarting.
-* **Live Logs Tab**: Real-time terminal streaming logs via Server-Sent Events (SSE).
+* **Dashboard View**: View live connection health, active 5-tuple flow, handshake age, transfer stats, and trigger manual port rebinds or hunts.
+* **Live Logs View**: Real-time terminal streaming logs via Server-Sent Events (SSE).
 
 ---
 
