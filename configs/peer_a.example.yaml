@@ -61,3 +61,23 @@ web:
     - "192.168.0.0/16"
     - "10.0.0.0/8"
     - "172.16.0.0/12"
+
+  # Optional HTTPS / SSL for Admin Panel:
+  # https: true
+  # cert_file: "/etc/ssl/certs/autowg_admin.crt"
+  # key_file: "/etc/ssl/private/autowg_admin.key"
+
+# ==============================================================================
+# Public Status & Uptime Page (Isolated Listener)
+# Serves ONLY uptime, downtime, and recovery history with NO admin access or keys.
+# ==============================================================================
+status_page:
+  # Enable public status page (default: false)
+  enabled: false
+  listen_addr: "0.0.0.0:8081"
+  title: "Service Status"
+
+  # SSL / HTTPS support:
+  # https: true
+  # cert_file: "/etc/ssl/certs/status.crt"
+  # key_file: "/etc/ssl/private/status.key"

@@ -86,12 +86,12 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Initialize Embedded Web Panel
+	// Initialize Web Server(s) (Admin Panel and/or Public Status Page)
 	var webServer *web.Server
-	if cfg.Web.Enabled {
+	if cfg.Web.Enabled || cfg.StatusPage.Enabled {
 		webServer = web.NewServer(h, log)
 		if err := webServer.Start(); err != nil {
-			log.Warn("MAIN", "Failed to start web server: %v", err)
+			log.Warn("MAIN", "Failed to start web server(s): %v", err)
 		}
 	}
 

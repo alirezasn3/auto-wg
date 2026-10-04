@@ -97,3 +97,23 @@ web:
 		t.Errorf("Expected reloaded handshake_timeout 30s, got %v", reloaded.Hunter.HandshakeTimeout)
 	}
 }
+
+func TestStatusPageConfigDefaults(t *testing.T) {
+	cfg := &Config{}
+	SetDefaults(cfg)
+
+	if cfg.StatusPage.ListenAddr != "0.0.0.0:8081" {
+		t.Errorf("Expected default status page listen addr 0.0.0.0:8081, got %s", cfg.StatusPage.ListenAddr)
+	}
+	if cfg.StatusPage.Title != "Service Status" {
+		t.Errorf("Expected default status page title 'Service Status', got %q", cfg.StatusPage.Title)
+	}
+
+	cfgTLS := &Config{
+		StatusPage: StatusPageConfig{HTTPS: true},
+	}
+	SetDefaults(cfgTLS)
+	if cfgTLS.StatusPage.ListenAddr != "0.0.0.0:8443" {
+		t.Errorf("Expected default HTTPS status page listen addr 0.0.0.0:8443, got %s", cfgTLS.StatusPage.ListenAddr)
+	}
+}

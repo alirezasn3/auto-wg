@@ -5,9 +5,12 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io/fs"
+	"math"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -20,63 +23,163 @@ import (
 var staticFS embed.FS
 
 type Server struct {
-	hunter *hunter.Hunter
-	log    *logger.Logger
-	server *http.Server
+	hunter       *hunter.Hunter
+	log          *logger.Logger
+	adminServer  *http.Server
+	statusServer *http.Server
+	statusTmpl   *template.Template
+}
+
+type PublicStatus struct {
+	Title                 string        `json:"title"`
+	Connected             bool          `json:"connected"`
+	State                 string        `json:"state"`
+	StatusMessage         string        `json:"status_message"`
+	StatusDescription     string        `json:"status_description"`
+	UptimeSeconds         float64       `json:"uptime_seconds"`
+	UptimeFormatted       string        `json:"uptime_formatted"`
+	LastConnectedAt       string        `json:"last_connected_at"`
+	LastConnectedAgo      string        `json:"last_connected_ago"`
+	LastDisconnectedAt    string        `json:"last_disconnected_at"`
+	LastDowntimeSeconds   float64       `json:"last_downtime_seconds"`
+	LastDowntimeFormatted string        `json:"last_downtime_formatted"`
+	LastDowntimeAgo       string        `json:"last_downtime_ago"`
+	UptimePercent         float64       `json:"uptime_percent"`
+	Events                []PublicEvent `json:"events"`
+	ServerTime            string        `json:"server_time"`
+	InitialDataJSON       string        `json:"-"`
+}
+
+type PublicEvent struct {
+	Type        string  `json:"type"` // "CONNECTED" or "DISCONNECTED"
+	Timestamp   string  `json:"timestamp"`
+	DurationSec float64 `json:"duration_sec"`
+	Duration    string  `json:"duration"`
+	Message     string  `json:"message"`
 }
 
 func NewServer(h *hunter.Hunter, log *logger.Logger) *Server {
+	tmpl, err := template.ParseFS(staticFS, "static/status.html")
+	if err != nil {
+		log.Warn("WEB", "Failed to parse status.html template: %v", err)
+	}
+
 	return &Server{
-		hunter: h,
-		log:    log,
+		hunter:     h,
+		log:        log,
+		statusTmpl: tmpl,
 	}
 }
 
 func (s *Server) Start() error {
 	cfg := s.hunter.GetConfig()
 
-	subFS, err := fs.Sub(staticFS, "static")
-	if err != nil {
-		return fmt.Errorf("sub static fs: %w", err)
-	}
-
-	mux := http.NewServeMux()
-
-	// API routes
-	mux.HandleFunc("/api/status", s.handleStatus)
-	mux.HandleFunc("/api/config", s.handleConfig)
-	mux.HandleFunc("/api/logs", s.handleLogs)
-	mux.HandleFunc("/api/logs/stream", s.handleLogStream)
-	mux.HandleFunc("/api/actions/hunt", s.handleActionHunt)
-	mux.HandleFunc("/api/actions/rebind", s.handleActionRebind)
-
-	// Static UI assets
-	fileServer := http.FileServer(http.FS(subFS))
-	mux.Handle("/", fileServer)
-
-	// Auth wrapper
-	handler := s.authMiddleware(mux)
-
-	s.server = &http.Server{
-		Addr:         cfg.Web.ListenAddr,
-		Handler:      handler,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 0, // Keep open for SSE
-	}
-
-	s.log.Info("WEB", "Web Panel available at http://%s", cfg.Web.ListenAddr)
-	go func() {
-		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			s.log.Error("WEB", "Web server failed: %v", err)
+	// 1. Admin Web Panel
+	if cfg.Web.Enabled {
+		subFS, err := fs.Sub(staticFS, "static")
+		if err != nil {
+			return fmt.Errorf("sub static fs: %w", err)
 		}
-	}()
+
+		adminMux := http.NewServeMux()
+		adminMux.HandleFunc("/api/status", s.handleStatus)
+		adminMux.HandleFunc("/api/config", s.handleConfig)
+		adminMux.HandleFunc("/api/logs", s.handleLogs)
+		adminMux.HandleFunc("/api/logs/stream", s.handleLogStream)
+		adminMux.HandleFunc("/api/actions/hunt", s.handleActionHunt)
+		adminMux.HandleFunc("/api/actions/rebind", s.handleActionRebind)
+		adminMux.Handle("/", http.FileServer(http.FS(subFS)))
+
+		handler := s.authMiddleware(adminMux)
+
+		s.adminServer = &http.Server{
+			Addr:         cfg.Web.ListenAddr,
+			Handler:      handler,
+			ReadTimeout:  15 * time.Second,
+			WriteTimeout: 0, // Keep open for SSE
+		}
+
+		if cfg.Web.HTTPS {
+			if cfg.Web.CertFile == "" || cfg.Web.KeyFile == "" {
+				return fmt.Errorf("web: https is enabled but cert_file or key_file is missing")
+			}
+			if _, err := os.Stat(cfg.Web.CertFile); err != nil {
+				return fmt.Errorf("web cert_file: %w", err)
+			}
+			if _, err := os.Stat(cfg.Web.KeyFile); err != nil {
+				return fmt.Errorf("web key_file: %w", err)
+			}
+			s.log.Info("WEB", "Web Admin Panel available at https://%s", cfg.Web.ListenAddr)
+			go func() {
+				if err := s.adminServer.ListenAndServeTLS(cfg.Web.CertFile, cfg.Web.KeyFile); err != nil && err != http.ErrServerClosed {
+					s.log.Error("WEB", "Web admin server TLS failed: %v", err)
+				}
+			}()
+		} else {
+			s.log.Info("WEB", "Web Admin Panel available at http://%s", cfg.Web.ListenAddr)
+			go func() {
+				if err := s.adminServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					s.log.Error("WEB", "Web admin server failed: %v", err)
+				}
+			}()
+		}
+	}
+
+	// 2. Public Status Page (Uptime & Downtime Only)
+	if cfg.StatusPage.Enabled {
+		statusMux := http.NewServeMux()
+		statusMux.HandleFunc("/", s.handleStatusPage)
+
+		s.statusServer = &http.Server{
+			Addr:         cfg.StatusPage.ListenAddr,
+			Handler:      statusMux,
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 10 * time.Second,
+		}
+
+		if cfg.StatusPage.HTTPS {
+			if cfg.StatusPage.CertFile == "" || cfg.StatusPage.KeyFile == "" {
+				return fmt.Errorf("status_page: https is enabled but cert_file or key_file is missing")
+			}
+			if _, err := os.Stat(cfg.StatusPage.CertFile); err != nil {
+				return fmt.Errorf("status_page cert_file: %w", err)
+			}
+			if _, err := os.Stat(cfg.StatusPage.KeyFile); err != nil {
+				return fmt.Errorf("status_page key_file: %w", err)
+			}
+			s.log.Info("WEB", "Public Status Page available at https://%s", cfg.StatusPage.ListenAddr)
+			go func() {
+				if err := s.statusServer.ListenAndServeTLS(cfg.StatusPage.CertFile, cfg.StatusPage.KeyFile); err != nil && err != http.ErrServerClosed {
+					s.log.Error("WEB", "Public status server TLS failed: %v", err)
+				}
+			}()
+		} else {
+			s.log.Info("WEB", "Public Status Page available at http://%s", cfg.StatusPage.ListenAddr)
+			go func() {
+				if err := s.statusServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					s.log.Error("WEB", "Public status server failed: %v", err)
+				}
+			}()
+		}
+	}
 
 	return nil
 }
 
 func (s *Server) Stop(ctx context.Context) error {
-	if s.server != nil {
-		return s.server.Shutdown(ctx)
+	var errs []string
+	if s.adminServer != nil {
+		if err := s.adminServer.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Sprintf("admin server: %v", err))
+		}
+	}
+	if s.statusServer != nil {
+		if err := s.statusServer.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Sprintf("status server: %v", err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("shutdown errors: %s", strings.Join(errs, ", "))
 	}
 	return nil
 }
@@ -245,4 +348,216 @@ func (s *Server) handleActionRebind(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "rebind_triggered"})
+}
+
+func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+
+	pubStatus := s.getPublicStatus()
+
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(pubStatus)
+		return
+	}
+
+	if s.statusTmpl == nil {
+		http.Error(w, "Status page template not loaded", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.statusTmpl.Execute(w, pubStatus); err != nil {
+		s.log.Error("WEB", "Failed to render status page: %v", err)
+	}
+}
+
+func (s *Server) getPublicStatus() PublicStatus {
+	st := s.hunter.GetStatus()
+	cfg := s.hunter.GetConfig()
+
+	title := cfg.StatusPage.Title
+	if title == "" {
+		title = "Service Status"
+	}
+
+	isConnected := st.State == hunter.StateConnected
+	now := time.Now()
+
+	var uptimeSec float64
+	var lastConnAgo string
+	if !st.LastConnectedAt.IsZero() {
+		diff := now.Sub(st.LastConnectedAt).Seconds()
+		if diff < 0 {
+			diff = 0
+		}
+		if isConnected {
+			uptimeSec = diff
+		}
+		lastConnAgo = formatDurationAgo(st.LastConnectedAt, now)
+	} else {
+		lastConnAgo = "Never"
+	}
+
+	var lastDowntimeSec float64
+	var lastDiscAgo string
+	if !st.LastDisconnectedAt.IsZero() {
+		diff := now.Sub(st.LastDisconnectedAt).Seconds()
+		if diff < 0 {
+			diff = 0
+		}
+		lastDiscAgo = formatDurationAgo(st.LastDisconnectedAt, now)
+	} else {
+		lastDiscAgo = "Never"
+	}
+
+	// Calculate uptime ratio and extract sanitized events
+	var totalUpSec, totalDownSec float64
+	for _, evt := range st.Events {
+		if evt.Type == hunter.StateConnected {
+			// DurationSec on connected event is the downtime that just ended
+			totalDownSec += evt.DurationSec
+			if lastDowntimeSec == 0 && evt.DurationSec > 0 {
+				lastDowntimeSec = evt.DurationSec
+			}
+		} else if evt.Type == hunter.StateDisconnected {
+			// DurationSec on disconnected event is the uptime that just ended
+			totalUpSec += evt.DurationSec
+		}
+	}
+	if isConnected && uptimeSec > 0 {
+		totalUpSec += uptimeSec
+	}
+	if !isConnected && !st.LastDisconnectedAt.IsZero() {
+		currDown := now.Sub(st.LastDisconnectedAt).Seconds()
+		if currDown > 0 {
+			totalDownSec += currDown
+			lastDowntimeSec = currDown
+		}
+	}
+
+	uptimePercent := 100.0
+	if totalUpSec+totalDownSec > 0 {
+		uptimePercent = (totalUpSec / (totalUpSec + totalDownSec)) * 100.0
+	}
+
+	var lastDowntimeFormatted string
+	if lastDowntimeSec > 0 {
+		lastDowntimeFormatted = formatDurationHuman(lastDowntimeSec)
+	}
+
+	publicEvents := make([]PublicEvent, 0, len(st.Events))
+	for _, evt := range st.Events {
+		durStr := formatDurationHuman(evt.DurationSec)
+		msg := "Operational"
+		if evt.Type == hunter.StateConnected {
+			if evt.DurationSec > 0 {
+				msg = fmt.Sprintf("Connection restored (interruption was %s)", durStr)
+			} else {
+				msg = "Connection established"
+			}
+		} else if evt.Type == hunter.StateDisconnected {
+			if evt.DurationSec > 0 {
+				msg = fmt.Sprintf("Service interrupted (was up for %s)", durStr)
+			} else {
+				msg = "Service interrupted"
+			}
+		}
+
+		publicEvents = append(publicEvents, PublicEvent{
+			Type:        evt.Type,
+			Timestamp:   evt.Timestamp.Format(time.RFC3339),
+			DurationSec: evt.DurationSec,
+			Duration:    durStr,
+			Message:     msg,
+		})
+	}
+
+	statusMsg := "All Systems Operational"
+	statusDesc := "The tunnel is active and passing traffic."
+	if !isConnected {
+		statusMsg = "Service Interruption"
+		statusDesc = "The tunnel is interrupted; automatic port recovery in progress."
+	}
+
+	var lastConnRFC, lastDiscRFC string
+	if !st.LastConnectedAt.IsZero() {
+		lastConnRFC = st.LastConnectedAt.Format(time.RFC3339)
+	}
+	if !st.LastDisconnectedAt.IsZero() {
+		lastDiscRFC = st.LastDisconnectedAt.Format(time.RFC3339)
+	}
+
+	pub := PublicStatus{
+		Title:                 title,
+		Connected:             isConnected,
+		State:                 st.State,
+		StatusMessage:         statusMsg,
+		StatusDescription:     statusDesc,
+		UptimeSeconds:         uptimeSec,
+		UptimeFormatted:       formatDurationHuman(uptimeSec),
+		LastConnectedAt:       lastConnRFC,
+		LastConnectedAgo:      lastConnAgo,
+		LastDisconnectedAt:    lastDiscRFC,
+		LastDowntimeSeconds:   lastDowntimeSec,
+		LastDowntimeFormatted: lastDowntimeFormatted,
+		LastDowntimeAgo:       lastDiscAgo,
+		UptimePercent:         math.Round(uptimePercent*100) / 100,
+		Events:                publicEvents,
+		ServerTime:            now.Format(time.RFC3339),
+	}
+
+	jsonData, _ := json.Marshal(pub)
+	pub.InitialDataJSON = string(jsonData)
+
+	return pub
+}
+
+func formatDurationHuman(seconds float64) string {
+	if seconds <= 0 {
+		return "0s"
+	}
+	totalSec := int64(seconds)
+	days := totalSec / 86400
+	hours := (totalSec % 86400) / 3600
+	minutes := (totalSec % 3600) / 60
+	secs := totalSec % 60
+
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh %dm", days, hours, minutes)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm %ds", hours, minutes, secs)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%dm %ds", minutes, secs)
+	}
+	return fmt.Sprintf("%ds", secs)
+}
+
+func formatDurationAgo(t time.Time, now time.Time) string {
+	if t.IsZero() {
+		return "Never"
+	}
+	diff := now.Sub(t)
+	if diff < 0 {
+		diff = 0
+	}
+	sec := int64(diff.Seconds())
+	if sec < 60 {
+		return fmt.Sprintf("%ds ago", sec)
+	}
+	mins := sec / 60
+	if mins < 60 {
+		return fmt.Sprintf("%dm ago", mins)
+	}
+	hours := mins / 60
+	if hours < 24 {
+		return fmt.Sprintf("%dh %dm ago", hours, mins%60)
+	}
+	days := hours / 24
+	return fmt.Sprintf("%dd %dh ago", days, hours%24)
 }

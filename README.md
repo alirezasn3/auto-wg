@@ -154,6 +154,15 @@ Open `http://<your-server-ip>:8080` in your browser:
 | `web.username` | string | `""` | Optional HTTP Basic Auth username |
 | `web.password` | string | `""` | Optional HTTP Basic Auth password |
 | `web.allowed_ips`| list of string| `[]` | Whitelist of client IPs/CIDRs allowed to access panel (e.g. `["127.0.0.1", "192.168.0.0/16"]`). If empty, all IPs allowed |
+| `web.https` | bool | `false` | Enable HTTPS/TLS for the admin panel |
+| `web.cert_file` | string | `""` | Path to SSL certificate (PEM) for admin panel |
+| `web.key_file` | string | `""` | Path to SSL private key (PEM) for admin panel |
+| `status_page.enabled` | bool | `false` | Enable isolated public status page (uptime & downtime only, no admin controls) |
+| `status_page.listen_addr` | string | `0.0.0.0:8081` | Public status page listen address (`8443` if HTTPS) |
+| `status_page.title` | string | `Service Status` | Title displayed on the public status page |
+| `status_page.https` | bool | `false` | Enable HTTPS/TLS for the public status page |
+| `status_page.cert_file` | string | `""` | Path to SSL certificate (PEM) for status page |
+| `status_page.key_file` | string | `""` | Path to SSL private key (PEM) for status page |
 
 ---
 

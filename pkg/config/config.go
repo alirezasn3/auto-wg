@@ -13,10 +13,11 @@ import (
 )
 
 type Config struct {
-	WireGuard WireGuardConfig `yaml:"wireguard"`
-	Iptables  IptablesConfig  `yaml:"iptables"`
-	Hunter    HunterConfig    `yaml:"hunter"`
-	Web       WebConfig       `yaml:"web"`
+	WireGuard  WireGuardConfig  `yaml:"wireguard"`
+	Iptables   IptablesConfig   `yaml:"iptables"`
+	Hunter     HunterConfig     `yaml:"hunter"`
+	Web        WebConfig        `yaml:"web"`
+	StatusPage StatusPageConfig `yaml:"status_page"`
 }
 
 type WireGuardConfig struct {
@@ -52,6 +53,18 @@ type WebConfig struct {
 	Username   string   `yaml:"username"`    // Optional HTTP Basic Auth
 	Password   string   `yaml:"password"`
 	AllowedIPs []string `yaml:"allowed_ips"` // Whitelist of client IPs or CIDRs (e.g. ["127.0.0.1", "192.168.1.0/24"]). If empty, all IPs allowed.
+	HTTPS      bool     `yaml:"https"`       // Enable HTTPS/TLS (default: false)
+	CertFile   string   `yaml:"cert_file"`   // Path to SSL certificate (PEM)
+	KeyFile    string   `yaml:"key_file"`    // Path to SSL private key (PEM)
+}
+
+type StatusPageConfig struct {
+	Enabled    bool   `yaml:"enabled"`     // Enable public status page (default: false)
+	ListenAddr string `yaml:"listen_addr"` // e.g. "0.0.0.0:8081" (or "0.0.0.0:8443" for HTTPS)
+	Title      string `yaml:"title"`       // Optional custom title (default: "Service Status")
+	HTTPS      bool   `yaml:"https"`       // Enable HTTPS/TLS (default: false)
+	CertFile   string `yaml:"cert_file"`   // Path to SSL certificate (PEM)
+	KeyFile    string `yaml:"key_file"`    // Path to SSL private key (PEM)
 }
 
 // LoadConfig reads and parses configuration from a YAML file.
@@ -127,6 +140,17 @@ func SetDefaults(cfg *Config) {
 
 	if cfg.Web.ListenAddr == "" {
 		cfg.Web.ListenAddr = "0.0.0.0:8080"
+	}
+
+	if cfg.StatusPage.ListenAddr == "" {
+		if cfg.StatusPage.HTTPS {
+			cfg.StatusPage.ListenAddr = "0.0.0.0:8443"
+		} else {
+			cfg.StatusPage.ListenAddr = "0.0.0.0:8081"
+		}
+	}
+	if cfg.StatusPage.Title == "" {
+		cfg.StatusPage.Title = "Service Status"
 	}
 }
 
