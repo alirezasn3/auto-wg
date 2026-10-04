@@ -488,7 +488,6 @@ class AutoWGApp {
 
     this.eventsList.innerHTML = html;
   }
-  }
 
   connectLogStream() {
     if (this.eventSource) {
