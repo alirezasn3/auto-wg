@@ -91,44 +91,30 @@ func TestHunterEventsAndDirection(t *testing.T) {
 
 	// 1. Initial State
 	st := h.GetStatus()
-	if st.LastDirection != "Peer A ⇄ Peer B" {
-		t.Errorf("expected default direction 'Peer A ⇄ Peer B', got %q", st.LastDirection)
+	if st.LastDirection != "Local ⇄ Remote" {
+		t.Errorf("expected default direction 'Local ⇄ Remote', got %q", st.LastDirection)
 	}
 	if len(st.Events) != 0 {
 		t.Errorf("expected 0 events, got %d", len(st.Events))
 	}
 
-	// 2. Local is Peer A (isPrimary = true)
-	// Case A: Local dialed the remote port recently -> Peer A -> Peer B
+	// 2. Case A: Local dialed the remote port recently -> Local -> Remote
 	h.lastDialedRemotePort = 25000
 	h.lastDialedAt = time.Now()
-	dir, init := h.determineDirection(true, 25000)
-	if dir != "Peer A → Peer B" || init != "Peer A" {
-		t.Errorf("expected Peer A → Peer B (init Peer A), got %s (init %s)", dir, init)
+	dir, init := h.determineDirection(25000)
+	if dir != "Local → Remote" || init != "Local Host" {
+		t.Errorf("expected Local → Remote (init Local Host), got %s (init %s)", dir, init)
 	}
 
-	// Case B: Remote initiated (different port or not dialed recently) -> Peer B -> Peer A
-	dir, init = h.determineDirection(true, 26000)
-	if dir != "Peer B → Peer A" || init != "Peer B" {
-		t.Errorf("expected Peer B → Peer A (init Peer B), got %s (init %s)", dir, init)
-	}
-
-	// 3. Local is Peer B (isPrimary = false)
-	// Case C: Local dialed the remote port recently -> Peer B -> Peer A
-	dir, init = h.determineDirection(false, 25000)
-	if dir != "Peer B → Peer A" || init != "Peer B" {
-		t.Errorf("expected Peer B → Peer A (init Peer B), got %s (init %s)", dir, init)
-	}
-
-	// Case D: Remote initiated -> Peer A -> Peer B
-	dir, init = h.determineDirection(false, 26000)
-	if dir != "Peer A → Peer B" || init != "Peer A" {
-		t.Errorf("expected Peer A → Peer B (init Peer A), got %s (init %s)", dir, init)
+	// 3. Case B: Remote initiated (different port or not dialed recently) -> Remote -> Local
+	dir, init = h.determineDirection(26000)
+	if dir != "Remote → Local" || init != "Remote Peer" {
+		t.Errorf("expected Remote → Local (init Remote Peer), got %s (init %s)", dir, init)
 	}
 
 	// 4. Test addEvent and cap at 50
 	for i := 0; i < 60; i++ {
-		h.addEvent(StateConnected, "Peer A → Peer B", "Peer A", "test", float64(i))
+		h.addEvent(StateConnected, "Local → Remote", "Local Host", "test", float64(i))
 	}
 	st = h.GetStatus()
 	if len(st.Events) != 50 {
@@ -137,5 +123,8 @@ func TestHunterEventsAndDirection(t *testing.T) {
 	// Most recent event is at index 0
 	if st.Events[0].DurationSec != 59 {
 		t.Errorf("expected newest event duration 59, got %v", st.Events[0].DurationSec)
+	}
+	if st.Events[0].LocalRole != "Primary" {
+		t.Errorf("expected LocalRole Primary, got %s", st.Events[0].LocalRole)
 	}
 }

@@ -29,9 +29,9 @@ type ConnectionEvent struct {
 	ID          int64     `json:"id"`
 	Type        string    `json:"type"`        // "CONNECTED" or "DISCONNECTED"
 	Timestamp   time.Time `json:"timestamp"`
-	Direction   string    `json:"direction"`   // "Peer A → Peer B" or "Peer B → Peer A"
-	Initiator   string    `json:"initiator"`   // "Peer A" or "Peer B"
-	LocalRole   string    `json:"local_role"`  // "Peer A" or "Peer B"
+	Direction   string    `json:"direction"`   // "Local → Remote" or "Remote → Local"
+	Initiator   string    `json:"initiator"`   // "Local Host" or "Remote Peer"
+	LocalRole   string    `json:"local_role"`  // "Primary" or "Secondary"
 	LocalPort   int       `json:"local_port"`
 	RemotePort  int       `json:"remote_port"`
 	TargetIP    string    `json:"target_ip"`
@@ -115,7 +115,7 @@ func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *ipta
 		iptMgr:        iptMgr,
 		log:           log,
 		state:         StateUnknown,
-		lastDirection: "Peer A ⇄ Peer B",
+		lastDirection: "Local ⇄ Remote",
 		events:        make([]ConnectionEvent, 0, 50),
 		manualTrigger: make(chan string, 10),
 	}
@@ -123,9 +123,9 @@ func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *ipta
 
 func (h *Hunter) addEvent(eventType string, direction string, initiator string, reason string, durationSec float64) {
 	h.nextEventID++
-	localRole := "Peer B"
+	localRole := "Secondary"
 	if h.localPubKey != "" && h.peerPubKey != "" && h.localPubKey < h.peerPubKey {
-		localRole = "Peer A"
+		localRole = "Primary"
 	}
 
 	evt := ConnectionEvent{
@@ -280,7 +280,7 @@ func (h *Hunter) tick(ctx context.Context) {
 			h.successfulHunts++
 			h.currentAttempt = 0
 
-			dir, init := h.determineDirection(isPrimary, dev.PeerPort)
+			dir, init := h.determineDirection(dev.PeerPort)
 			h.lastDirection = dir
 			var downtimeSec float64
 			if !h.lastDisconnectedAt.IsZero() {
@@ -294,7 +294,7 @@ func (h *Hunter) tick(ctx context.Context) {
 			} else {
 				h.lastConnectedAt = time.Now()
 			}
-			dir := "Peer A ⇄ Peer B"
+			dir := "Local ⇄ Remote"
 			h.lastDirection = dir
 			remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
 			h.addEvent(StateConnected, dir, "Initial Handshake", fmt.Sprintf("Link active: :%d -> %s", h.localPort, remoteEndpointStr), 0)
@@ -325,7 +325,7 @@ func (h *Hunter) tick(ctx context.Context) {
 				h.successfulHunts++
 				h.currentAttempt = 0
 
-				dir, init := h.determineDirection(isPrimary, dev.PeerPort)
+				dir, init := h.determineDirection(dev.PeerPort)
 				h.lastDirection = dir
 				var downtimeSec float64
 				if !h.lastDisconnectedAt.IsZero() {
@@ -335,7 +335,7 @@ func (h *Hunter) tick(ctx context.Context) {
 				h.addEvent(StateConnected, dir, init, fmt.Sprintf("Ping verified: :%d -> %s", h.localPort, remoteEndpointStr), downtimeSec)
 			} else if h.lastConnectedAt.IsZero() {
 				h.lastConnectedAt = time.Now()
-				dir := "Peer A ⇄ Peer B"
+				dir := "Local ⇄ Remote"
 				h.lastDirection = dir
 				remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
 				h.addEvent(StateConnected, dir, "Initial Ping", fmt.Sprintf("Ping verified: :%d -> %s", h.localPort, remoteEndpointStr), 0)
@@ -416,7 +416,7 @@ func (h *Hunter) tick(ctx context.Context) {
 	}
 }
 
-func (h *Hunter) determineDirection(isPrimary bool, currentRemotePort int) (string, string) {
+func (h *Hunter) determineDirection(currentRemotePort int) (string, string) {
 	localInitiated := false
 	if !h.lastDialedAt.IsZero() && time.Since(h.lastDialedAt) < 2*time.Minute {
 		if currentRemotePort == h.lastDialedRemotePort && h.lastDialedRemotePort > 0 {
@@ -424,25 +424,10 @@ func (h *Hunter) determineDirection(isPrimary bool, currentRemotePort int) (stri
 		}
 	}
 
-	direction := "Peer A → Peer B"
-	initiator := "Peer A"
-	if isPrimary {
-		// Local is Peer A
-		if !localInitiated {
-			direction = "Peer B → Peer A"
-			initiator = "Peer B"
-		}
-	} else {
-		// Local is Peer B
-		if localInitiated {
-			direction = "Peer B → Peer A"
-			initiator = "Peer B"
-		} else {
-			direction = "Peer A → Peer B"
-			initiator = "Peer A"
-		}
+	if localInitiated {
+		return "Local → Remote", "Local Host"
 	}
-	return direction, initiator
+	return "Remote → Local", "Remote Peer"
 }
 
 func (h *Hunter) executeHunt(reason string) {
@@ -622,7 +607,7 @@ func (h *Hunter) GetStatus() StatusReport {
 
 	lastDir := h.lastDirection
 	if lastDir == "" {
-		lastDir = "Peer A ⇄ Peer B"
+		lastDir = "Local ⇄ Remote"
 	}
 
 	return StatusReport{

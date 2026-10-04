@@ -556,12 +556,14 @@ body {
   letter-spacing: 0.5px;
 }
 
+.bridge-direction.dir-local-to-remote,
 .bridge-direction.dir-a-to-b {
   color: #38bdf8;
   border-color: rgba(56, 189, 248, 0.6);
   box-shadow: 0 0 10px rgba(56, 189, 248, 0.15);
 }
 
+.bridge-direction.dir-remote-to-local,
 .bridge-direction.dir-b-to-a {
   color: #c084fc;
   border-color: rgba(192, 132, 252, 0.6);
@@ -949,18 +951,21 @@ body {
   flex-shrink: 0;
 }
 
+.event-direction-badge.local-to-remote,
 .event-direction-badge.a-to-b {
   color: #38bdf8;
   border-color: rgba(56, 189, 248, 0.4);
   background: rgba(56, 189, 248, 0.08);
 }
 
+.event-direction-badge.remote-to-local,
 .event-direction-badge.b-to-a {
   color: #c084fc;
   border-color: rgba(192, 132, 252, 0.4);
   background: rgba(192, 132, 252, 0.08);
 }
 
+.event-direction-badge.bidirectional,
 .event-direction-badge.peer-both {
   color: var(--text-muted);
 }

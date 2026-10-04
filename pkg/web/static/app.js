@@ -320,13 +320,13 @@ class AutoWGApp {
     }
 
     if (this.flowDirectionBadge) {
-      const dir = data.last_direction || 'Peer A ⇄ Peer B';
+      const dir = data.last_direction || 'Local ⇄ Remote';
       this.flowDirectionBadge.textContent = dir;
       this.flowDirectionBadge.className = 'bridge-badge bridge-direction';
-      if (dir.includes('Peer A → Peer B')) {
-        this.flowDirectionBadge.classList.add('dir-a-to-b');
-      } else if (dir.includes('Peer B → Peer A')) {
-        this.flowDirectionBadge.classList.add('dir-b-to-a');
+      if (dir.includes('Local → Remote')) {
+        this.flowDirectionBadge.classList.add('dir-local-to-remote');
+      } else if (dir.includes('Remote → Local')) {
+        this.flowDirectionBadge.classList.add('dir-remote-to-local');
       }
     }
 
@@ -426,11 +426,11 @@ class AutoWGApp {
       const typeClass = isConnected ? 'connected' : 'disconnected';
       const typeLabel = isConnected ? 'Connected' : 'Disconnected';
 
-      let dirClass = 'peer-both';
-      if (evt.direction && evt.direction.includes('Peer A → Peer B')) {
-        dirClass = 'a-to-b';
-      } else if (evt.direction && evt.direction.includes('Peer B → Peer A')) {
-        dirClass = 'b-to-a';
+      let dirClass = 'bidirectional';
+      if (evt.direction && evt.direction.includes('Local → Remote')) {
+        dirClass = 'local-to-remote';
+      } else if (evt.direction && evt.direction.includes('Remote → Local')) {
+        dirClass = 'remote-to-local';
       }
 
       const date = new Date(evt.timestamp);
@@ -466,16 +466,16 @@ class AutoWGApp {
 
       const initiatorText = evt.initiator ? ` (Initiator: ${escapeHtml(evt.initiator)})` : '';
       const reasonText = evt.reason ? escapeHtml(evt.reason) : '';
-      const localRoleText = evt.local_role ? `Local: ${escapeHtml(evt.local_role)}` : '';
+      const roleText = evt.local_role ? `Role: ${escapeHtml(evt.local_role)}` : '';
 
       html += `
         <div class="event-item">
           <div class="event-left">
             <span class="event-badge ${typeClass}">${typeLabel}</span>
-            <span class="event-direction-badge ${dirClass}">${escapeHtml(evt.direction || 'Peer A ⇄ Peer B')}</span>
+            <span class="event-direction-badge ${dirClass}">${escapeHtml(evt.direction || 'Local ⇄ Remote')}</span>
             <div class="event-info">
               <div class="event-reason">${reasonText}${initiatorText}</div>
-              <div class="event-duration">${localRoleText}${durationStr}</div>
+              <div class="event-duration">${roleText}${durationStr}</div>
             </div>
           </div>
           <div class="event-right">
