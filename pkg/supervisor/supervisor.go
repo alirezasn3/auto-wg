@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 
 	"auto-wg/pkg/cmdexec"
@@ -49,7 +50,16 @@ func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *ipta
 		tunnelOrder: make([]string, 0, len(cfg.Tunnels)),
 	}
 
+	cfgDir := filepath.Dir(cfgPath)
+
 	for _, t := range cfg.Tunnels {
+		if t.HistoryFile != "off" && t.HistoryFile != "none" {
+			if t.HistoryFile == "" {
+				t.HistoryFile = filepath.Join(cfgDir, fmt.Sprintf("history-%s.json", t.Interface))
+			} else if !filepath.IsAbs(t.HistoryFile) {
+				t.HistoryFile = filepath.Join(cfgDir, t.HistoryFile)
+			}
+		}
 		s.tunnelOrder = append(s.tunnelOrder, t.Interface)
 		h := hunter.New(t, wgCtrl, iptMgr, log, s.handleStateChange)
 		s.hunters[t.Interface] = h

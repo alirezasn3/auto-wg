@@ -22,6 +22,7 @@ func RunCommands(ctx context.Context, commands []string, phase string, log *logg
 		tag = "EXEC"
 	}
 
+	var lastErr error
 	for i, cmdStr := range commands {
 		cmdStr = strings.TrimSpace(cmdStr)
 		if cmdStr == "" || strings.HasPrefix(cmdStr, "#") {
@@ -46,9 +47,10 @@ func RunCommands(ctx context.Context, commands []string, phase string, log *logg
 		trimmedOut := strings.TrimSpace(string(out))
 		if err != nil {
 			if log != nil {
-				log.Error(tag, "Command failed: %s (error: %v, output: %s)", cmdStr, err, trimmedOut)
+				log.Warn(tag, "Command warning: %s (error: %v, output: %s)", cmdStr, err, trimmedOut)
 			}
-			return fmt.Errorf("command %q failed: %w (output: %s)", cmdStr, err, trimmedOut)
+			lastErr = fmt.Errorf("command %q failed: %w (output: %s)", cmdStr, err, trimmedOut)
+			continue
 		}
 
 		if trimmedOut != "" && log != nil {
@@ -56,5 +58,5 @@ func RunCommands(ctx context.Context, commands []string, phase string, log *logg
 		}
 	}
 
-	return nil
+	return lastErr
 }

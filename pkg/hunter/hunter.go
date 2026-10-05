@@ -257,6 +257,7 @@ func (h *Hunter) saveHistoryLocked() error {
 		_ = os.Remove(h.historyFile)
 		return os.Rename(tmpFile, h.historyFile)
 	}
+	h.log.Info("HUNTER", "[%s] Saved persistent history to %s", h.cfg.Interface, h.historyFile)
 	return nil
 }
 
@@ -311,6 +312,9 @@ func (h *Hunter) Start(ctx context.Context) {
 
 	// Apply iptables rule if enabled
 	h.applyIptablesRule()
+
+	// Save initial history state so the file exists on disk immediately
+	_ = h.SaveHistory()
 
 	ticker := time.NewTicker(h.cfg.CheckInterval)
 	defer ticker.Stop()
