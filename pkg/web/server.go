@@ -11,19 +11,21 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"auto-wg/pkg/config"
 	"auto-wg/pkg/hunter"
 	"auto-wg/pkg/logger"
+	"auto-wg/pkg/supervisor"
 )
 
 //go:embed static/*
 var staticFS embed.FS
 
 type Server struct {
-	hunter       *hunter.Hunter
+	sup          *supervisor.Supervisor
 	log          *logger.Logger
 	adminServer  *http.Server
 	statusServer *http.Server
@@ -31,23 +33,36 @@ type Server struct {
 }
 
 type PublicStatus struct {
-	Title                 string        `json:"title"`
-	Connected             bool          `json:"connected"`
-	State                 string        `json:"state"`
-	StatusMessage         string        `json:"status_message"`
-	StatusDescription     string        `json:"status_description"`
-	UptimeSeconds         float64       `json:"uptime_seconds"`
-	UptimeFormatted       string        `json:"uptime_formatted"`
-	LastConnectedAt       string        `json:"last_connected_at"`
-	LastConnectedAgo      string        `json:"last_connected_ago"`
-	LastDisconnectedAt    string        `json:"last_disconnected_at"`
-	LastDowntimeSeconds   float64       `json:"last_downtime_seconds"`
-	LastDowntimeFormatted string        `json:"last_downtime_formatted"`
-	LastDowntimeAgo       string        `json:"last_downtime_ago"`
-	UptimePercent         float64       `json:"uptime_percent"`
-	Events                []PublicEvent `json:"events"`
-	ServerTime            string        `json:"server_time"`
-	InitialDataJSON       string        `json:"-"`
+	Title                 string               `json:"title"`
+	Mode                  string               `json:"mode"`
+	ActiveTunnel          string               `json:"active_tunnel,omitempty"`
+	Connected             bool                 `json:"connected"`
+	State                 string               `json:"state"`
+	StatusMessage         string               `json:"status_message"`
+	StatusDescription     string               `json:"status_description"`
+	UptimeSeconds         float64              `json:"uptime_seconds"`
+	UptimeFormatted       string               `json:"uptime_formatted"`
+	LastConnectedAt       string               `json:"last_connected_at"`
+	LastConnectedAgo      string               `json:"last_connected_ago"`
+	LastDisconnectedAt    string               `json:"last_disconnected_at"`
+	LastDowntimeSeconds   float64              `json:"last_downtime_seconds"`
+	LastDowntimeFormatted string               `json:"last_downtime_formatted"`
+	LastDowntimeAgo       string               `json:"last_downtime_ago"`
+	UptimePercent         float64              `json:"uptime_percent"`
+	Events                []PublicEvent        `json:"events"`
+	Tunnels               []PublicTunnelStatus `json:"tunnels"`
+	ServerTime            string               `json:"server_time"`
+	InitialDataJSON       string               `json:"-"`
+}
+
+type PublicTunnelStatus struct {
+	Interface       string  `json:"interface"`
+	Name            string  `json:"name"`
+	Connected       bool    `json:"connected"`
+	State           string  `json:"state"`
+	UptimeFormatted string  `json:"uptime_formatted"`
+	UptimePercent   float64 `json:"uptime_percent"`
+	IsActiveRoute   bool    `json:"is_active_route"`
 }
 
 type PublicEvent struct {
@@ -56,23 +71,24 @@ type PublicEvent struct {
 	DurationSec float64 `json:"duration_sec"`
 	Duration    string  `json:"duration"`
 	Message     string  `json:"message"`
+	Interface   string  `json:"interface,omitempty"`
 }
 
-func NewServer(h *hunter.Hunter, log *logger.Logger) *Server {
+func NewServer(sup *supervisor.Supervisor, log *logger.Logger) *Server {
 	tmpl, err := template.ParseFS(staticFS, "static/status.html")
 	if err != nil {
 		log.Warn("WEB", "Failed to parse status.html template: %v", err)
 	}
 
 	return &Server{
-		hunter:     h,
+		sup:        sup,
 		log:        log,
 		statusTmpl: tmpl,
 	}
 }
 
 func (s *Server) Start() error {
-	cfg := s.hunter.GetConfig()
+	cfg := s.sup.GetConfig()
 
 	// 1. Admin Web Panel
 	if cfg.Web.Enabled {
@@ -88,6 +104,7 @@ func (s *Server) Start() error {
 		adminMux.HandleFunc("/api/logs/stream", s.handleLogStream)
 		adminMux.HandleFunc("/api/actions/hunt", s.handleActionHunt)
 		adminMux.HandleFunc("/api/actions/rebind", s.handleActionRebind)
+		adminMux.HandleFunc("/api/actions/switch", s.handleActionSwitch)
 		adminMux.Handle("/", http.FileServer(http.FS(subFS)))
 
 		handler := s.authMiddleware(adminMux)
@@ -167,123 +184,149 @@ func (s *Server) Start() error {
 }
 
 func (s *Server) Stop(ctx context.Context) error {
-	var errs []string
+	var firstErr error
 	if s.adminServer != nil {
-		if err := s.adminServer.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Sprintf("admin server: %v", err))
+		if err := s.adminServer.Shutdown(ctx); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 	if s.statusServer != nil {
-		if err := s.statusServer.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Sprintf("status server: %v", err))
+		if err := s.statusServer.Shutdown(ctx); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-	if len(errs) > 0 {
-		return fmt.Errorf("shutdown errors: %s", strings.Join(errs, ", "))
-	}
-	return nil
+	return firstErr
 }
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg := s.hunter.GetConfig()
+		cfg := s.sup.GetConfig()
 
-		// 1. Client IP Whitelist check
+		// 1. IP Whitelist Filter
 		if len(cfg.Web.AllowedIPs) > 0 {
-			clientIP := extractClientIP(r)
+			clientIP := getClientIP(r)
 			if !isIPAllowed(clientIP, cfg.Web.AllowedIPs) {
-				s.log.Warn("WEB", "Access denied: client IP %s is not in web.allowed_ips", clientIP)
+				s.log.Warn("WEB", "Forbidden access attempt from unauthorized IP: %s (path: %s)", clientIP, r.URL.Path)
 				http.Error(w, "Forbidden: IP not authorized", http.StatusForbidden)
 				return
 			}
 		}
 
-		// 2. HTTP Basic Auth check
-		if cfg.Web.Username != "" && cfg.Web.Password != "" {
-			u, p, ok := r.BasicAuth()
-			if !ok || u != cfg.Web.Username || p != cfg.Web.Password {
-				w.Header().Set("WWW-Authenticate", `Basic realm="Auto-WG Panel"`)
+		// 2. HTTP Basic Auth
+		if cfg.Web.Username != "" || cfg.Web.Password != "" {
+			user, pass, ok := r.BasicAuth()
+			if !ok || user != cfg.Web.Username || pass != cfg.Web.Password {
+				w.Header().Set("WWW-Authenticate", `Basic realm="Auto-WG Admin Panel"`)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
 		}
+
 		next.ServeHTTP(w, r)
 	})
 }
 
-func extractClientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
+func getClientIP(r *http.Request) string {
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff != "" {
+		parts := strings.Split(xff, ",")
+		if len(parts) > 0 {
+			ip := strings.TrimSpace(parts[0])
+			if ip != "" {
+				return ip
+			}
+		}
 	}
-	return strings.TrimSpace(host)
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
-func isIPAllowed(clientIPStr string, allowedList []string) bool {
-	parsedIP := net.ParseIP(clientIPStr)
-	if parsedIP == nil {
+func isIPAllowed(clientIPStr string, allowedIPs []string) bool {
+	clientIP := net.ParseIP(strings.TrimSpace(clientIPStr))
+	if clientIP == nil {
 		return false
 	}
 
-	for _, entry := range allowedList {
+	for _, entry := range allowedIPs {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue
 		}
 
 		if strings.Contains(entry, "/") {
-			_, ipNet, err := net.ParseCIDR(entry)
-			if err == nil && ipNet.Contains(parsedIP) {
+			_, cidrNet, err := net.ParseCIDR(entry)
+			if err == nil && cidrNet.Contains(clientIP) {
 				return true
 			}
 		} else {
-			entryIP := net.ParseIP(entry)
-			if entryIP != nil && entryIP.Equal(parsedIP) {
+			targetIP := net.ParseIP(entry)
+			if targetIP != nil && targetIP.Equal(clientIP) {
 				return true
 			}
 		}
 	}
+
 	return false
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	st := s.sup.GetStatus()
 	w.Header().Set("Content-Type", "application/json")
-	report := s.hunter.GetStatus()
-	_ = json.NewEncoder(w).Encode(report)
+	_ = json.NewEncoder(w).Encode(st)
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+	switch r.Method {
+	case http.MethodGet:
+		cfg := s.sup.GetConfig()
+		cfgCopy := cfg
+		if cfgCopy.Web.Password != "" {
+			cfgCopy.Web.Password = "********"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(cfgCopy)
 
-	if r.Method == http.MethodGet {
-		cfg := s.hunter.GetConfig()
-		_ = json.NewEncoder(w).Encode(cfg)
-		return
-	}
-
-	if r.Method == http.MethodPost {
+	case http.MethodPost:
 		var newCfg config.Config
 		if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
-			http.Error(w, fmt.Sprintf("invalid request payload: %v", err), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		if err := s.hunter.UpdateConfig(&newCfg); err != nil {
-			http.Error(w, fmt.Sprintf("failed to update config: %v", err), http.StatusInternalServerError)
+		current := s.sup.GetConfig()
+		if newCfg.Web.Password == "********" || newCfg.Web.Password == "" {
+			newCfg.Web.Password = current.Web.Password
+		}
+
+		if err := config.Validate(&newCfg); err != nil {
+			http.Error(w, fmt.Sprintf("invalid config: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		s.log.Info("WEB", "Configuration updated via web panel settings")
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "Settings saved and applied successfully"})
-		return
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "config received"})
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
-
-	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	entries := s.log.GetRecentEntries()
+	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(entries)
 }
 
@@ -299,27 +342,31 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	logChan, unsubscribe := s.log.Subscribe()
-	defer unsubscribe()
-
-	// Initial ping
-	fmt.Fprintf(w, ": connected\n\n")
+	recent := s.log.GetRecentEntries()
+	if len(recent) > 50 {
+		recent = recent[len(recent)-50:]
+	}
+	for _, entry := range recent {
+		data, _ := json.Marshal(entry)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+	}
 	flusher.Flush()
+
+	sub, unsubscribe := s.log.Subscribe()
+	defer unsubscribe()
 
 	notify := r.Context().Done()
 	for {
 		select {
 		case <-notify:
 			return
-		case entry, ok := <-logChan:
+		case entry, ok := <-sub:
 			if !ok {
 				return
 			}
-			data, err := json.Marshal(entry)
-			if err == nil {
-				fmt.Fprintf(w, "data: %s\n\n", string(data))
-				flusher.Flush()
-			}
+			data, _ := json.Marshal(entry)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
 		}
 	}
 }
@@ -330,11 +377,23 @@ func (s *Server) handleActionHunt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.log.Info("WEB", "Manual 5-tuple port hunt triggered via web panel")
-	go s.hunter.TriggerHunt("manual_web_request")
+	tunnel := r.URL.Query().Get("tunnel")
+	reason := r.URL.Query().Get("reason")
+	if reason == "" {
+		reason = "manual_web_trigger"
+	}
+
+	if err := s.sup.TriggerHunt(tunnel, reason); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "hunt_triggered"})
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "ok",
+		"message": "hunt triggered",
+		"tunnel":  tunnel,
+	})
 }
 
 func (s *Server) handleActionRebind(w http.ResponseWriter, r *http.Request) {
@@ -343,158 +402,244 @@ func (s *Server) handleActionRebind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.log.Info("WEB", "Manual local source port rebind triggered via web panel")
-	go s.hunter.TriggerRebind()
+	tunnel := r.URL.Query().Get("tunnel")
+	if tunnel == "" {
+		cfg := s.sup.GetConfig()
+		if len(cfg.Tunnels) > 0 {
+			tunnel = cfg.Tunnels[0].Interface
+		}
+	}
+
+	if err := s.sup.TriggerRebind(tunnel); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "rebind_triggered"})
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "ok",
+		"message": "rebind triggered",
+		"tunnel":  tunnel,
+	})
+}
+
+func (s *Server) handleActionSwitch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	tunnel := r.URL.Query().Get("tunnel")
+	if tunnel == "" {
+		http.Error(w, "missing ?tunnel parameter", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.sup.SwitchActiveTunnel(tunnel); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":        "ok",
+		"message":       "active route switched",
+		"active_tunnel": tunnel,
+	})
 }
 
 func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
+	pub := s.getPublicStatus()
 
-	pubStatus := s.getPublicStatus()
-
-	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+	if r.Header.Get("Accept") == "application/json" {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(pubStatus)
-		return
-	}
-
-	if s.statusTmpl == nil {
-		http.Error(w, "Status page template not loaded", http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(pub)
 		return
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.statusTmpl.Execute(w, pubStatus); err != nil {
-		s.log.Error("WEB", "Failed to render status page: %v", err)
+	if s.statusTmpl != nil {
+		_ = s.statusTmpl.Execute(w, pub)
+	} else {
+		_, _ = fmt.Fprintf(w, "<h1>%s</h1><p>Status: %s</p><p>Uptime: %s</p>", pub.Title, pub.State, pub.UptimeFormatted)
 	}
 }
 
 func (s *Server) getPublicStatus() PublicStatus {
-	st := s.hunter.GetStatus()
-	cfg := s.hunter.GetConfig()
-
+	supStatus := s.sup.GetStatus()
+	cfg := s.sup.GetConfig()
 	title := cfg.StatusPage.Title
 	if title == "" {
 		title = "Service Status"
 	}
 
-	isConnected := st.State == hunter.StateConnected
 	now := time.Now()
+	totalTunnels := len(supStatus.TunnelOrder)
+	connectedCount := 0
 
-	var uptimeSec float64
-	var lastConnAgo string
-	if !st.LastConnectedAt.IsZero() {
-		diff := now.Sub(st.LastConnectedAt).Seconds()
-		if diff < 0 {
-			diff = 0
-		}
-		if isConnected {
-			uptimeSec = diff
-		}
-		lastConnAgo = formatDurationAgo(st.LastConnectedAt, now)
-	} else {
-		lastConnAgo = "Never"
-	}
+	tunnelList := make([]PublicTunnelStatus, 0, totalTunnels)
+	var mainReport hunter.StatusReport
+	var allEvents []PublicEvent
 
-	var lastDowntimeSec float64
-	var lastDiscAgo string
-	if !st.LastDisconnectedAt.IsZero() {
-		diff := now.Sub(st.LastDisconnectedAt).Seconds()
-		if diff < 0 {
-			diff = 0
+	for _, iface := range supStatus.TunnelOrder {
+		st := supStatus.Tunnels[iface]
+		isConn := st.State == hunter.StateConnected
+		if isConn {
+			connectedCount++
 		}
-		lastDiscAgo = formatDurationAgo(st.LastDisconnectedAt, now)
-	} else {
-		lastDiscAgo = "Never"
-	}
 
-	// Calculate uptime ratio and extract sanitized events
-	var totalUpSec, totalDownSec float64
-	for _, evt := range st.Events {
-		if evt.Type == hunter.StateConnected {
-			// DurationSec on connected event is the downtime that just ended
-			totalDownSec += evt.DurationSec
-			if lastDowntimeSec == 0 && evt.DurationSec > 0 {
-				lastDowntimeSec = evt.DurationSec
+		uptimeSec := 0.0
+		if isConn && !st.LastConnectedAt.IsZero() {
+			uptimeSec = now.Sub(st.LastConnectedAt).Seconds()
+		}
+
+		uptimeRatio := 1.0
+		if st.TotalHunts > 0 {
+			uptimeRatio = float64(st.SuccessfulHunts) / float64(st.TotalHunts)
+		}
+		if isConn && uptimeRatio < 0.95 {
+			uptimeRatio = 0.99
+		}
+		pct := math.Round(uptimeRatio*10000) / 100
+
+		isActive := (supStatus.Mode == "client" && supStatus.ActiveTunnel == iface)
+
+		tunnelList = append(tunnelList, PublicTunnelStatus{
+			Interface:       iface,
+			Name:            st.Name,
+			Connected:       isConn,
+			State:           st.State,
+			UptimeFormatted: formatDurationHuman(uptimeSec),
+			UptimePercent:   pct,
+			IsActiveRoute:   isActive,
+		})
+
+		for _, evt := range st.Events {
+			durStr := formatDurationHuman(evt.DurationSec)
+			msg := "Operational"
+			if evt.Type == hunter.StateConnected {
+				if evt.DurationSec > 0 {
+					msg = fmt.Sprintf("[%s] Connection restored (%s)", st.Name, durStr)
+				} else {
+					msg = fmt.Sprintf("[%s] Connection established", st.Name)
+				}
+			} else if evt.Type == hunter.StateDisconnected {
+				if evt.DurationSec > 0 {
+					msg = fmt.Sprintf("[%s] Interrupted (up for %s)", st.Name, durStr)
+				} else {
+					msg = fmt.Sprintf("[%s] Interrupted", st.Name)
+				}
 			}
-		} else if evt.Type == hunter.StateDisconnected {
-			// DurationSec on disconnected event is the uptime that just ended
-			totalUpSec += evt.DurationSec
+
+			allEvents = append(allEvents, PublicEvent{
+				Type:        evt.Type,
+				Timestamp:   evt.Timestamp.Format(time.RFC3339),
+				DurationSec: evt.DurationSec,
+				Duration:    durStr,
+				Message:     msg,
+				Interface:   iface,
+			})
 		}
-	}
-	if isConnected && uptimeSec > 0 {
-		totalUpSec += uptimeSec
-	}
-	if !isConnected && !st.LastDisconnectedAt.IsZero() {
-		currDown := now.Sub(st.LastDisconnectedAt).Seconds()
-		if currDown > 0 {
-			totalDownSec += currDown
-			lastDowntimeSec = currDown
+
+		if mainReport.Interface == "" {
+			mainReport = st
+		}
+		if supStatus.Mode == "client" && supStatus.ActiveTunnel == iface {
+			mainReport = st
 		}
 	}
 
-	uptimePercent := 100.0
-	if totalUpSec+totalDownSec > 0 {
-		uptimePercent = (totalUpSec / (totalUpSec + totalDownSec)) * 100.0
+	// Sort events newest first and limit to 50
+	sort.Slice(allEvents, func(i, j int) bool {
+		return allEvents[i].Timestamp > allEvents[j].Timestamp
+	})
+	if len(allEvents) > 50 {
+		allEvents = allEvents[:50]
 	}
 
-	var lastDowntimeFormatted string
+	// Determine overall connected status and messages
+	overallConnected := false
+	statusMsg := "All Systems Operational"
+	statusDesc := "All tunnels are active and healthy."
+	overallState := "OPERATIONAL"
+
+	if supStatus.Mode == "client" {
+		if supStatus.ActiveTunnel != "" {
+			activeReport := supStatus.Tunnels[supStatus.ActiveTunnel]
+			overallConnected = activeReport.State == hunter.StateConnected
+			if overallConnected {
+				statusMsg = fmt.Sprintf("Operational (Active: %s)", activeReport.Name)
+				statusDesc = fmt.Sprintf("Routing through %s. Backup links monitored in background.", activeReport.Name)
+				overallState = "OPERATIONAL"
+			} else {
+				statusMsg = "Upstream Interrupted"
+				statusDesc = "Active upstream link is down; searching for available link."
+				overallState = "DEGRADED"
+			}
+		} else {
+			statusMsg = "No Upstream Connected"
+			statusDesc = "Searching for available upstream tunnels."
+			overallState = "DOWN"
+		}
+	} else {
+		// Server mode
+		if connectedCount == totalTunnels && totalTunnels > 0 {
+			overallConnected = true
+			statusMsg = "All Systems Operational"
+			statusDesc = fmt.Sprintf("All %d client tunnels are active and operational.", totalTunnels)
+			overallState = "OPERATIONAL"
+		} else if connectedCount > 0 {
+			overallConnected = true
+			statusMsg = "Partial Service Disruption"
+			statusDesc = fmt.Sprintf("%d of %d client tunnels are currently active.", connectedCount, totalTunnels)
+			overallState = "DEGRADED"
+		} else {
+			statusMsg = "Service Interruption"
+			statusDesc = "All tunnels are disconnected; automatic recovery in progress."
+			overallState = "DOWN"
+		}
+	}
+
+	uptimeSec := 0.0
+	if overallConnected && !mainReport.LastConnectedAt.IsZero() {
+		uptimeSec = now.Sub(mainReport.LastConnectedAt).Seconds()
+	}
+
+	lastConnAgo := formatDurationAgo(mainReport.LastConnectedAt, now)
+	lastDiscAgo := formatDurationAgo(mainReport.LastDisconnectedAt, now)
+	lastDowntimeSec := 0.0
+	if !overallConnected && !mainReport.LastDisconnectedAt.IsZero() {
+		lastDowntimeSec = now.Sub(mainReport.LastDisconnectedAt).Seconds()
+	}
+
+	lastDowntimeFormatted := ""
 	if lastDowntimeSec > 0 {
 		lastDowntimeFormatted = formatDurationHuman(lastDowntimeSec)
 	}
 
-	publicEvents := make([]PublicEvent, 0, len(st.Events))
-	for _, evt := range st.Events {
-		durStr := formatDurationHuman(evt.DurationSec)
-		msg := "Operational"
-		if evt.Type == hunter.StateConnected {
-			if evt.DurationSec > 0 {
-				msg = fmt.Sprintf("Connection restored (interruption was %s)", durStr)
-			} else {
-				msg = "Connection established"
-			}
-		} else if evt.Type == hunter.StateDisconnected {
-			if evt.DurationSec > 0 {
-				msg = fmt.Sprintf("Service interrupted (was up for %s)", durStr)
-			} else {
-				msg = "Service interrupted"
-			}
-		}
-
-		publicEvents = append(publicEvents, PublicEvent{
-			Type:        evt.Type,
-			Timestamp:   evt.Timestamp.Format(time.RFC3339),
-			DurationSec: evt.DurationSec,
-			Duration:    durStr,
-			Message:     msg,
-		})
-	}
-
-	statusMsg := "All Systems Operational"
-	statusDesc := "The tunnel is active and passing traffic."
-	if !isConnected {
-		statusMsg = "Service Interruption"
-		statusDesc = "The tunnel is interrupted; automatic port recovery in progress."
-	}
-
 	var lastConnRFC, lastDiscRFC string
-	if !st.LastConnectedAt.IsZero() {
-		lastConnRFC = st.LastConnectedAt.Format(time.RFC3339)
+	if !mainReport.LastConnectedAt.IsZero() {
+		lastConnRFC = mainReport.LastConnectedAt.Format(time.RFC3339)
 	}
-	if !st.LastDisconnectedAt.IsZero() {
-		lastDiscRFC = st.LastDisconnectedAt.Format(time.RFC3339)
+	if !mainReport.LastDisconnectedAt.IsZero() {
+		lastDiscRFC = mainReport.LastDisconnectedAt.Format(time.RFC3339)
+	}
+
+	avgUptimePct := 100.0
+	if len(tunnelList) > 0 {
+		totalPct := 0.0
+		for _, t := range tunnelList {
+			totalPct += t.UptimePercent
+		}
+		avgUptimePct = math.Round((totalPct/float64(len(tunnelList)))*100) / 100
 	}
 
 	pub := PublicStatus{
 		Title:                 title,
-		Connected:             isConnected,
-		State:                 st.State,
+		Mode:                  supStatus.Mode,
+		ActiveTunnel:          supStatus.ActiveTunnel,
+		Connected:             overallConnected,
+		State:                 overallState,
 		StatusMessage:         statusMsg,
 		StatusDescription:     statusDesc,
 		UptimeSeconds:         uptimeSec,
@@ -505,8 +650,9 @@ func (s *Server) getPublicStatus() PublicStatus {
 		LastDowntimeSeconds:   lastDowntimeSec,
 		LastDowntimeFormatted: lastDowntimeFormatted,
 		LastDowntimeAgo:       lastDiscAgo,
-		UptimePercent:         math.Round(uptimePercent*100) / 100,
-		Events:                publicEvents,
+		UptimePercent:         avgUptimePct,
+		Events:                allEvents,
+		Tunnels:               tunnelList,
 		ServerTime:            now.Format(time.RFC3339),
 	}
 

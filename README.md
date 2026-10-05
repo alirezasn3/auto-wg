@@ -1,60 +1,76 @@
-# Auto-WG: Autonomous WireGuard Port Negotiator & DPI Bypass
+# Auto-WG: Autonomous WireGuard Port Negotiator & Multi-Interface Gateway
 
 Auto-WG is a high-performance Go application designed to keep WireGuard connections alive in hostile network environments with Deep Packet Inspection (DPI), stateful flow blocking, and asymmetric reachability.
 
-By combining **autonomous symmetrical hunting** with **kernel-level `iptables` port-range forwarding**, Auto-WG allows two WireGuard peers to dynamically rotate connection 5-tuples and self-heal stalled links **without needing any external server, Cloudflare Worker, or out-of-band negotiator**.
+By combining **autonomous symmetrical hunting**, **kernel-level `iptables` port-range forwarding**, and **dynamic policy routing failover**, Auto-WG allows WireGuard peers to dynamically rotate connection 5-tuples and self-heal stalled links **without needing any external server, Cloudflare Worker, or out-of-band negotiator**.
+
+Auto-WG natively supports two primary deployment topologies:
+1. **Server Mode (`mode: "server"`)**: A server that maintains resilient connections to one or more clients across independent WireGuard interfaces.
+2. **Client Mode (`mode: "client"`)**: A client that has one or more upstream connections and dynamically switches the active route to an available tunnel based on real-time link health.
 
 ---
 
 ## ⚡ Key Highlights
 
 * **Zero-Negotiator Autonomous Hunting**: No external signaling relays, Cloudflare Workers, or rendezvous servers needed. Both peers monitor link state and recover 100% autonomously.
-* **Kernel Port Forwarding (`go-iptables`)**: Automatically forwards a large range of UDP ports (e.g. `20000–30000`) directly to WireGuard's listening port using `iptables -t nat -A PREROUTING -j REDIRECT`. Linux `conntrack` automatically manages reverse translation.
-* **Auto-Discovery of Peer Key & Target IP**: Neither `peer_public_key` nor `target_ip` is needed in `config.yaml`. Auto-WG queries the WireGuard interface (e.g. `wg0`) and automatically extracts the single peer's public key, current endpoint, and handshake statistics.
-* **Client Source-Port Busting**: DPI often detects the WireGuard handshake and blacklists the client's source port. Auto-WG dynamically rotates both local `ListenPort` and remote `Endpoint` port, creating a fresh 5-tuple `(src_ip, new_src_port, dst_ip, new_dst_port, UDP)` to reset DPI filters.
+* **Pure Netlink/UAPI WireGuard Control (`wgctrl`)**: Interacts directly with the Linux WireGuard kernel module via native Netlink without spawning sub-processes.
+* **Multi-Interface Architecture**: Supervise multiple tunnels simultaneously on a single machine, with isolated port ranges, independent health probes, and per-tunnel persistent state.
+* **Upstream Route Failover (Policy Routing / Table 200)**: In client mode, Auto-WG monitors upstream health and dynamically updates default routes in a designated routing table (e.g. `table 200`) using `ip route replace default dev <iface> table 200`. The host's main routing table and SSH sessions are never disrupted.
+* **PostUp & PreDown Lifecycle Hooks**: Execute custom shell commands (policy routing rules, iptables MASQUERADE, UFW forwardings) automatically upon daemon start and shutdown.
+* **Kernel Port Forwarding (`go-iptables`)**: Automatically forwards disjoint UDP port ranges (e.g., `20000–24999`, `25000–29999`) directly to each WireGuard interface's listening port using `iptables -t nat -A PREROUTING -j REDIRECT`. Linux `conntrack` handles reverse translation.
+* **Automatic Peer Discovery**: Auto-WG queries each WireGuard interface and automatically extracts the single peer's public key, current endpoint, and handshake statistics directly from the kernel.
 * **Deterministic Anti-Collision Staggering**: Uses public key lexicographical comparison (`localPubKey < peerPubKey`) to coordinate turn-taking windows (e.g. 8s cycle) so peers do not collide or flap while hunting.
-* **Integrated Web Dashboard**: Built-in modern, mobile-responsive web UI with live telemetry, handshake tracking, 5-tuple flow visualization, manual hunt triggers, and live streaming logs (SSE).
-* **Standard WireGuard & AmneziaWG**: Works natively via `wgctrl` (Netlink / UAPI) and supports CLI mode (`wg` or `awg` for AmneziaWG obfuscated setups).
+* **Integrated Web Dashboard & Public Status Page**: Modern, mobile-responsive web UI with multi-tunnel telemetry, active route indication, manual hunt/rebind triggers, live SSE logs, and an isolated bilingual (Persian & English) public status page.
 
 ---
 
-## 🏗️ How It Works
+## 🏗️ Architecture & Topologies
+
+### 1. Server Mode (One Server -> Multiple Clients)
+
+In Server Mode, Auto-WG supervises multiple client interfaces on the server. Each client interface is assigned a disjoint port slice (e.g., `20000-24999` for Client A, `25000-29999` for Client B):
 
 ```
-        ┌─────────────────────────────────────────────────────────────┐
-        │  Peer A (e.g. 198.51.100.1)     Peer B (e.g. 203.0.113.1)   │
-        │                                                             │
-        │  iptables REDIRECT:             iptables REDIRECT:          │
-        │  UDP 20000-30000 -> :51820      UDP 20000-30000 -> :51820   │
-        └──────────────┬───────────────────────────────┬──────────────┘
-                       │                               │
-                       │ ◄─── Auto-WG Autonomous ────► │
-                       │      5-Tuple Hunter Loop      │
-                       │                               │
-                       ▼                               ▼
-                ┌──────────────┐                ┌──────────────┐
-                │  WireGuard   │                │  WireGuard   │
-                │  Interface   │                │  Interface   │
-                │    (wg0)     │                │    (wg0)     │
-                └──────────────┘                └──────────────┘
+                       ┌─────────────────────────────────────┐
+                       │           Auto-WG Server            │
+                       │                                     │
+                       │  wg0 (Client A): UDP 20000-24999    │
+                       │  wg1 (Client B): UDP 25000-29999    │
+                       └───────────┬─────────────┬───────────┘
+                                   │             │
+                Autonomous Hunting │             │ Autonomous Hunting
+               (UDP 20000-24999)   │             │ (UDP 25000-29999)
+                                   ▼             ▼
+                            ┌────────────┐ ┌────────────┐
+                            │  Client A  │ │  Client B  │
+                            │   (wg0)    │ │   (wg0)    │
+                            └────────────┘ └────────────┘
 ```
 
-1. **Both peers forward a port range**: Auto-WG uses `github.com/coreos/go-iptables` to ensure `iptables -t nat -A PREROUTING -p udp --dport 20000:30000 -j REDIRECT --to-ports 51820` is installed.
-2. **The receiver is always ready**: Because the entire range is forwarded, Peer A can send to *any* port between 20000 and 30000 on Peer B, and Peer B's WireGuard will automatically receive it on port 51820.
-3. **Synchronized Failure Detection**: Both peers inspect WireGuard's `LatestHandshake` timestamp locally. When DPI drops the connection, both peers detect it at the exact same time (e.g., `time.Since(latestHandshake) > 15s`).
-4. **Autonomous Port Hunt**:
-   - **Local `ListenPort`**: Rotated to a new port in the forwarded range (generating a brand new source port for DPI).
-   - **Remote `Endpoint` port**: Rotated to a port in the remote peer's range.
-5. **Noise Protocol Simultaneous Handshake**: WireGuard natively handles bidirectional handshake initiation and updates its internal peer endpoint via roaming. Once a handshake completes, both daemons detect `LatestHandshake` updated and return to idle monitoring.
+### 2. Client Mode (Upstream Failover & Policy Routing)
 
----
+In Client Mode, the machine maintains one or more upstream tunnels (e.g., `wgBridge0`, `wgBridge1`) to foreign servers. Auto-WG continuously monitors the health of each upstream link using handshake age and in-tunnel ICMP ping probes. When the active upstream drops, Auto-WG automatically updates the default route in policy routing table 200:
 
-## ⚠️ Important Note on Peer Configuration
-
-> [!IMPORTANT]
-> **Single Peer Per Interface**: Auto-WG automatically detects the single peer configured on the WireGuard interface. You **do not** need to specify `peer_public_key` or `target_ip` in `config.yaml`.
-> 
-> If you have multiple WireGuard peers, configure each peer on its own separate interface (e.g., `wg0`, `wg1`) and run separate Auto-WG instances.
+```
+                            ┌────────────────────────┐
+                            │    Incoming Traffic    │
+                            │ (e.g. user VPN wgServer)
+                            └───────────┬────────────┘
+                                        │ (lookup table 200)
+                                        ▼
+                     ┌──────────────────────────────────────┐
+                     │            Auto-WG Client            │
+                     │                                      │
+                     │  Active Route: dev wgBridge0 table 200│
+                     │  Backup Route: dev wgBridge1         │
+                     └──────────┬─────────────────┬─────────┘
+                                │ (Healthy)       │ (Standby / Hunting)
+                                ▼                 ▼
+                         ┌─────────────┐   ┌─────────────┐
+                         │ Upstream A  │   │ Upstream B  │
+                         │ (Foreign 1) │   │ (Foreign 2) │
+                         └─────────────┘   └─────────────┘
+```
 
 ---
 
@@ -70,33 +86,86 @@ go build -o autowg ./cmd/autowg
 
 ### 2. Configure
 
-Copy the example configuration for each peer:
+Auto-WG provides example configurations for both deployment modes:
+- **Server**: `configs/server.example.yaml`
+- **Client**: `configs/client.example.yaml`
+
+Copy the appropriate configuration:
 
 ```bash
-cp configs/peer_a.example.yaml config.yaml
+# For a Server node:
+cp configs/server.example.yaml config.yaml
+
+# For a Client node:
+cp configs/client.example.yaml config.yaml
 ```
 
-Minimal `config.yaml`:
+#### Client Configuration Example with Policy Routing (`table 200`):
 
 ```yaml
-wireguard:
-  interface: "wg0" # Name of your WireGuard interface
-  mode: "wgctrl"   # "wgctrl" (native) or "cli"
-  command: "wg"    # "wg" or "awg" (AmneziaWG)
+mode: "client"
 
-iptables:
+# Lifecycle hooks: setup policy routing, NAT MASQUERADE, and firewall rules
+post_up:
+  - "ip rule add to 10.0.0.1 lookup local priority 100"
+  - "ip rule add from 10.0.0.0/16 lookup 200 priority 200"
+  - "ip rule add to 192.168.69.0/24 lookup 200 priority 201"
+  - "ip route add 10.0.0.0/16 dev wgServer table 200"
+  - "iptables -t nat -I POSTROUTING -o wgBridge+ -j MASQUERADE"
+  - "ufw route allow in on wgServer out on wgBridge+"
+  - "ufw route allow in on wgBridge+ out on ens192"
+
+pre_down:
+  - "iptables -t nat -D POSTROUTING -o wgBridge+ -j MASQUERADE"
+  - "ip rule del from 10.0.0.0/16 lookup 200 priority 200"
+  - "ip rule del to 10.0.0.1 lookup local priority 100"
+  - "ip rule del to 192.168.69.0/24 lookup 200 priority 201"
+
+routing:
   enabled: true
-  port_range: "20000-30000"
+  table: 200       # Updates 'ip route replace default dev <iface> table 200'
+  mode: "sticky"   # "sticky" (avoids flapping) or "priority" (prefers first configured tunnel)
+  metric: 100
 
-hunter:
-  remote_port_range: "20000-30000"
-  check_interval: 3s
-  handshake_timeout: 15s
-  cycle_timeout: 8s
+tunnels:
+  - interface: "wgBridge0"
+    name: "Upstream-Main"
+    port_range: "20000-24999"
+    remote_port_range: "20000-24999"
+    handshake_timeout: 60s
+    cycle_timeout: 8s
+    check_interval: 3s
+    tunnel_ping:
+      enabled: true
+      target_ip: "10.100.0.1"
+      interval: 2s
+      failure_threshold: 3
+    history_file: "history-wgBridge0.json"
+    iptables: true
+
+  - interface: "wgBridge1"
+    name: "Upstream-Backup"
+    port_range: "25000-29999"
+    remote_port_range: "25000-29999"
+    handshake_timeout: 60s
+    cycle_timeout: 8s
+    check_interval: 3s
+    tunnel_ping:
+      enabled: true
+      target_ip: "10.200.0.1"
+      interval: 2s
+      failure_threshold: 3
+    history_file: "history-wgBridge1.json"
+    iptables: true
 
 web:
   enabled: true
-  listen_addr: "0.0.0.0:8080"
+  listen_addr: "127.0.0.1:8080"
+
+status_page:
+  enabled: true
+  listen_addr: "0.0.0.0:8081"
+  title: "Gateway Status"
 ```
 
 ### 3. Run or Install as a Service
@@ -107,7 +176,7 @@ Run directly with `sudo` (required for netlink device control, iptables, and ICM
 sudo ./autowg -config config.yaml
 ```
 
-To enable verbose debug logs:
+To enable verbose debug logging:
 
 ```bash
 sudo ./autowg -config config.yaml -debug
@@ -125,96 +194,81 @@ sudo ./autowg --install -config /etc/auto-wg/config.yaml
 sudo ./autowg --uninstall
 ```
 
-### 4. Access Web Dashboard
+### 4. Access Web Interfaces
 
-Open `http://<your-server-ip>:8080` in your browser:
-* **Dashboard View**: View live connection health, active 5-tuple flow, handshake age, transfer stats, and trigger manual port rebinds or hunts.
-* **Live Logs View**: Real-time terminal streaming logs via Server-Sent Events (SSE).
+- **Admin Dashboard**: `http://<ip>:8080` (or `127.0.0.1:8080`)
+  - Real-time connection health across all supervised tunnels.
+  - Active upstream route indication and manual switch overrides.
+  - Manual port rebind and hunt triggers.
+  - Live streaming logs via Server-Sent Events (SSE).
+- **Public Status Page**: `http://<ip>:8081`
+  - Zero sensitive data, no keys or administrative controls.
+  - Real-time uptime percentage, incident history, and bilingual Persian/English UI with RTL support.
 
 ---
 
 ## ⚙️ Configuration Reference
 
+### Root Level Options
+
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `wireguard.interface` | string | `wg0` | WireGuard interface to manage |
-| `wireguard.mode` | string | `wgctrl` | Native netlink (`wgctrl`) or executable (`cli`) |
-| `wireguard.command` | string | `wg` | Command binary name (`wg` or `awg` for AmneziaWG) |
-| `iptables.enabled` | bool | `true` | Auto-install iptables REDIRECT forwarding rule |
-| `iptables.port_range` | string | `20000-30000` | Local port range forwarded to WireGuard listen port |
-| `hunter.remote_port_range`| string | `20000-30000` | Remote peer's forwarded port range |
-| `hunter.check_interval` | duration| `3s` | How often to poll WireGuard handshake age |
-| `hunter.handshake_timeout`| duration| `60s` | Stale handshake threshold to trigger ping check |
-| `hunter.cycle_timeout` | duration| `8s` | Alternating stagger window to prevent peer collision |
-| `hunter.tunnel_ping.enabled` | bool | `true` | Active ICMP ping verification before hunting |
-| `hunter.tunnel_ping.target_ip` | string | `""` | Remote peer's in-tunnel IP to ping (e.g. `10.0.0.1`). Auto-derived from `AllowedIPs` if omitted |
-| `hunter.tunnel_ping.failure_threshold` | int | `3` | Consecutive ping timeouts before hunting |
-| `hunter.history_file` | string | `""` | Persistent history file path (default: `history.json` alongside config file; set to `"off"` to disable) |
-| `web.enabled` | bool | `true` | Enable built-in web dashboard |
-| `web.listen_addr` | string | `0.0.0.0:8080`| Web dashboard listen address |
+| `mode` | string | `server` | Operating mode: `"server"` (multi-client) or `"client"` (upstream failover) |
+| `post_up` | list of string | `[]` | Shell commands executed sequentially after tunnels initialize |
+| `pre_down` | list of string | `[]` | Shell commands executed sequentially before daemon exits |
+
+### `routing` (Client Mode Failover)
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `routing.enabled` | bool | `false` | Enable automatic default route switching when links fail |
+| `routing.table` | int | `0` | Linux routing table ID (e.g. `200` for policy routing, `0` for main) |
+| `routing.mode` | string | `sticky` | `"sticky"` (maintains current tunnel until it drops) or `"priority"` (prefers top tunnel) |
+| `routing.metric` | int | `100` | Metric value applied to the kernel route |
+
+### `tunnels[]` (Per-Tunnel Configuration)
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `interface` | string | **Required** | WireGuard interface name (`wg0`, `wgBridge0`, etc.) |
+| `name` | string | `""` | Human-friendly alias displayed on the web dashboard |
+| `port_range` | string | `20000-30000` | Local port range forwarded to WireGuard listen port |
+| `remote_port_range` | string | `20000-30000` | Remote peer's forwarded port range |
+| `iptables` | bool | `true` | Automatically manage `iptables -t nat -A PREROUTING` redirect rule |
+| `check_interval` | duration | `3s` | Interval between handshake and reachability polls |
+| `handshake_timeout` | duration | `60s` | Stale handshake threshold triggering reachability checks |
+| `cycle_timeout` | duration | `8s` | Alternating stagger window to prevent peer collision |
+| `tunnel_ping.enabled` | bool | `true` | Active ICMP ping verification before hunting |
+| `tunnel_ping.target_ip` | string | `""` | In-tunnel IP of the remote peer to ping |
+| `tunnel_ping.failure_threshold` | int | `3` | Consecutive ping timeouts before declaring link down |
+| `history_file` | string | `""` | Persistent history file path (e.g. `"history-wg0.json"`, or `"off"` to disable) |
+| `post_up` | list of string | `[]` | Tunnel-specific shell commands executed after this interface starts |
+| `pre_down` | list of string | `[]` | Tunnel-specific shell commands executed before this interface stops |
+
+### `web` (Admin Dashboard) & `status_page` (Public Status)
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `web.enabled` | bool | `true` | Enable built-in admin dashboard |
+| `web.listen_addr` | string | `0.0.0.0:8080` | Admin dashboard listen address |
 | `web.username` | string | `""` | Optional HTTP Basic Auth username |
 | `web.password` | string | `""` | Optional HTTP Basic Auth password |
-| `web.allowed_ips`| list of string| `[]` | Whitelist of client IPs/CIDRs allowed to access panel (e.g. `["127.0.0.1", "192.168.0.0/16"]`). If empty, all IPs allowed |
-| `web.https` | bool | `false` | Enable HTTPS/TLS for the admin panel |
-| `web.cert_file` | string | `""` | Path to SSL certificate (PEM) for admin panel |
-| `web.key_file` | string | `""` | Path to SSL private key (PEM) for admin panel |
-| `status_page.enabled` | bool | `false` | Enable isolated public status page (uptime & downtime only, no admin controls, Persian/English bilingual with RTL support) |
-| `status_page.listen_addr` | string | `0.0.0.0:8081` | Public status page listen address (`8443` if HTTPS) |
-| `status_page.title` | string | `Service Status` | Title displayed on the public status page |
-| `status_page.https` | bool | `false` | Enable HTTPS/TLS for the public status page |
-| `status_page.cert_file` | string | `""` | Path to SSL certificate (PEM) for status page |
-| `status_page.key_file` | string | `""` | Path to SSL private key (PEM) for status page |
+| `web.allowed_ips` | list of string | `[]` | Whitelist of client IPs/CIDRs permitted to access panel |
+| `web.https` | bool | `false` | Enable TLS/HTTPS for admin dashboard |
+| `web.cert_file` | string | `""` | SSL certificate PEM path |
+| `web.key_file` | string | `""` | SSL private key PEM path |
+| `status_page.enabled` | bool | `false` | Enable isolated public status page |
+| `status_page.listen_addr` | string | `0.0.0.0:8081` | Status page listen address |
+| `status_page.title` | string | `Service Status` | Title displayed on the status page |
+| `status_page.https` | bool | `false` | Enable TLS/HTTPS for status page |
+| `status_page.cert_file` | string | `""` | SSL certificate PEM path |
+| `status_page.key_file` | string | `""` | SSL private key PEM path |
 
 ---
 
-## 🐧 Systemd Service
+## 🧪 Testing
 
-Auto-WG can be automatically installed or managed manually:
-
-### Option A: Automatic (`--install` / `--uninstall`)
-
-```bash
-# Installs unit file, reloads systemd, enables and starts autowg
-sudo ./autowg --install -config /path/to/config.yaml
-
-# Stops service and removes unit file
-sudo ./autowg --uninstall
-```
-
-### Option B: Manual Unit File
-
-Create `/etc/systemd/system/autowg.service`:
-
-```ini
-[Unit]
-Description=Auto-WG Dynamic WireGuard Port Negotiator
-After=network.target wg-quick@wg0.service
-Wants=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/auto-wg
-ExecStart=/opt/auto-wg/autowg -config /opt/auto-wg/config.yaml
-Restart=always
-RestartSec=5s
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now autowg
-sudo systemctl status autowg
-```
-
----
-
-## 🧪 Running Tests
+Run the full automated test suite:
 
 ```bash
 go test -v -cover ./...
@@ -224,4 +278,4 @@ go test -v -cover ./...
 
 ## 📄 License
 
-MIT License. Feel free to use and adapt in your projects.
+MIT License.

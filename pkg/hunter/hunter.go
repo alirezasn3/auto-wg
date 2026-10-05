@@ -43,8 +43,9 @@ type ConnectionEvent struct {
 }
 
 type StatusReport struct {
-	State              string            `json:"state"`
 	Interface          string            `json:"interface"`
+	Name               string            `json:"name"`
+	State              string            `json:"state"`
 	LocalPublicKey     string            `json:"local_public_key"`
 	PeerPublicKey      string            `json:"peer_public_key"`
 	TargetIP           string            `json:"target_ip"`
@@ -84,14 +85,16 @@ type HistoryState struct {
 	SavedAt            time.Time         `json:"saved_at,omitempty"`
 }
 
+type StateChangeHandler func(h *Hunter, oldState, newState string)
+
 type Hunter struct {
-	cfgPath     string
-	cfg         *config.Config
-	historyFile string
-	wgCtrl      *wg.Controller
-	iptMgr      *iptables.Manager
-	log         *logger.Logger
-	mu          sync.RWMutex
+	cfg           config.TunnelConfig
+	historyFile   string
+	wgCtrl        *wg.Controller
+	iptMgr        *iptables.Manager
+	log           *logger.Logger
+	onStateChange StateChangeHandler
+	mu            sync.RWMutex
 
 	// Live state
 	state                string
@@ -123,22 +126,32 @@ type Hunter struct {
 	manualTrigger        chan string
 }
 
-func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *iptables.Manager, log *logger.Logger) *Hunter {
-	histFile := cfg.Hunter.HistoryFile
-	if histFile == "" && cfgPath != "" {
-		histFile = filepath.Join(filepath.Dir(cfgPath), "history.json")
+func New(tunnelCfg config.TunnelConfig, wgCtrl *wg.Controller, iptMgr *iptables.Manager, log *logger.Logger, onStateChange StateChangeHandler) *Hunter {
+	if tunnelCfg.CheckInterval <= 0 {
+		tunnelCfg.CheckInterval = 3 * time.Second
+	}
+	if tunnelCfg.HandshakeTimeout <= 0 {
+		tunnelCfg.HandshakeTimeout = 60 * time.Second
+	}
+	if tunnelCfg.CycleTimeout <= 0 {
+		tunnelCfg.CycleTimeout = 8 * time.Second
+	}
+
+	histFile := tunnelCfg.HistoryFile
+	if histFile == "" {
+		histFile = fmt.Sprintf("history-%s.json", tunnelCfg.Interface)
 	}
 	if histFile == "off" || histFile == "none" {
 		histFile = ""
 	}
 
 	h := &Hunter{
-		cfgPath:       cfgPath,
-		cfg:           cfg,
+		cfg:           tunnelCfg,
 		historyFile:   histFile,
 		wgCtrl:        wgCtrl,
 		iptMgr:        iptMgr,
 		log:           log,
+		onStateChange: onStateChange,
 		state:         StateUnknown,
 		lastDirection: "Local ⇄ Remote",
 		events:        make([]ConnectionEvent, 0, 50),
@@ -146,6 +159,17 @@ func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *ipta
 	}
 	h.loadHistory()
 	return h
+}
+
+func (h *Hunter) setState(newState string) {
+	oldState := h.state
+	if oldState == newState {
+		return
+	}
+	h.state = newState
+	if h.onStateChange != nil {
+		go h.onStateChange(h, oldState, newState)
+	}
 }
 
 func (h *Hunter) loadHistory() {
@@ -156,14 +180,14 @@ func (h *Hunter) loadHistory() {
 	data, err := os.ReadFile(h.historyFile)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			h.log.Warn("HUNTER", "Could not read history file %s: %v", h.historyFile, err)
+			h.log.Warn("HUNTER", "[%s] Could not read history file %s: %v", h.cfg.Interface, h.historyFile, err)
 		}
 		return
 	}
 
 	var state HistoryState
 	if err := json.Unmarshal(data, &state); err != nil {
-		h.log.Warn("HUNTER", "Could not parse history file %s: %v", h.historyFile, err)
+		h.log.Warn("HUNTER", "[%s] Could not parse history file %s: %v", h.cfg.Interface, h.historyFile, err)
 		return
 	}
 
@@ -187,8 +211,8 @@ func (h *Hunter) loadHistory() {
 		}
 	}
 
-	h.log.Info("HUNTER", "Loaded persistent history from %s (%d events, %d total hunts, %d successful)",
-		h.historyFile, len(h.events), h.totalHunts, h.successfulHunts)
+	h.log.Info("HUNTER", "[%s] Loaded persistent history from %s (%d events, %d total hunts, %d successful)",
+		h.cfg.Interface, h.historyFile, len(h.events), h.totalHunts, h.successfulHunts)
 }
 
 func (h *Hunter) saveHistoryLocked() error {
@@ -279,7 +303,7 @@ func (h *Hunter) addEvent(eventType string, direction string, initiator string, 
 
 // Start runs the autonomous monitoring and hunting loop.
 func (h *Hunter) Start(ctx context.Context) {
-	h.log.Info("HUNTER", "Starting Autonomous WireGuard Hunter (Zero-Negotiator Mode)")
+	h.log.Info("HUNTER", "[%s] Starting Autonomous WireGuard Hunter (Zero-Negotiator Mode)", h.cfg.Interface)
 	defer func() {
 		_ = h.SaveHistory()
 	}()
@@ -287,17 +311,17 @@ func (h *Hunter) Start(ctx context.Context) {
 	// Apply iptables rule if enabled
 	h.applyIptablesRule()
 
-	ticker := time.NewTicker(h.cfg.Hunter.CheckInterval)
+	ticker := time.NewTicker(h.cfg.CheckInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			h.log.Info("HUNTER", "Stopping hunter loop...")
+			h.log.Info("HUNTER", "[%s] Stopping hunter loop...", h.cfg.Interface)
 			return
 
 		case reason := <-h.manualTrigger:
-			h.log.Info("HUNTER", "Manual trigger received: %s", reason)
+			h.log.Info("HUNTER", "[%s] Manual trigger received: %s", h.cfg.Interface, reason)
 			h.executeHunt(reason)
 
 		case <-ticker.C:
@@ -308,13 +332,13 @@ func (h *Hunter) Start(ctx context.Context) {
 
 func (h *Hunter) applyIptablesRule() {
 	h.mu.Lock()
-	enabled := h.cfg.Iptables.Enabled
-	portRange := h.cfg.Iptables.PortRange
-	iface := h.cfg.WireGuard.Interface
+	enabled := h.cfg.Iptables
+	portRange := h.cfg.PortRange
+	iface := h.cfg.Interface
 	h.mu.Unlock()
 
 	if !enabled {
-		h.log.Info("HUNTER", "Iptables management is disabled in config")
+		h.log.Info("HUNTER", "[%s] Iptables management is disabled in config", iface)
 		return
 	}
 
@@ -325,8 +349,8 @@ func (h *Hunter) applyIptablesRule() {
 		targetPort = dev.ListenPort
 	}
 
-	if err := h.iptMgr.ApplyForwardingRule(portRange, targetPort); err != nil {
-		h.log.Warn("HUNTER", "Failed to apply iptables forwarding rule: %v", err)
+	if err := h.iptMgr.ApplyForwardingRule(iface, portRange, targetPort); err != nil {
+		h.log.Warn("HUNTER", "[%s] Failed to apply iptables forwarding rule: %v", iface, err)
 		h.mu.Lock()
 		h.iptablesActive = false
 		h.mu.Unlock()
@@ -339,15 +363,15 @@ func (h *Hunter) applyIptablesRule() {
 
 func (h *Hunter) tick(ctx context.Context) {
 	h.mu.RLock()
-	iface := h.cfg.WireGuard.Interface
-	timeout := h.cfg.Hunter.HandshakeTimeout
-	cycleTimeout := h.cfg.Hunter.CycleTimeout
-	pingEnabled := h.cfg.Hunter.TunnelPing.Enabled
-	threshold := h.cfg.Hunter.TunnelPing.FailureThreshold
+	iface := h.cfg.Interface
+	timeout := h.cfg.HandshakeTimeout
+	cycleTimeout := h.cfg.CycleTimeout
+	pingEnabled := h.cfg.TunnelPing.Enabled
+	threshold := h.cfg.TunnelPing.FailureThreshold
 	if threshold <= 0 {
 		threshold = 3
 	}
-	pingTimeout := h.cfg.Hunter.TunnelPing.Timeout
+	pingTimeout := h.cfg.TunnelPing.Timeout
 	if pingTimeout <= 0 {
 		pingTimeout = 2 * time.Second
 	}
@@ -356,9 +380,9 @@ func (h *Hunter) tick(ctx context.Context) {
 	dev, err := h.wgCtrl.GetDeviceInfo(iface, "")
 	if err != nil {
 		h.mu.Lock()
-		h.state = StateUnknown
+		h.setState(StateUnknown)
 		h.mu.Unlock()
-		h.log.Warn("HUNTER", "Cannot query WireGuard interface %s: %v", iface, err)
+		h.log.Warn("HUNTER", "[%s] Cannot query WireGuard interface %s: %v", iface, iface, err)
 		return
 	}
 
@@ -380,34 +404,30 @@ func (h *Hunter) tick(ctx context.Context) {
 	h.lastRxBytes = dev.ReceiveBytes
 
 	// Determine in-tunnel ping target:
-	// Priority 1: Manually configured target_ip in config
-	// Priority 2: Fallback to peer's AllowedIPs from WireGuard interface
-	pingTarget := strings.TrimSpace(h.cfg.Hunter.TunnelPing.TargetIP)
+	pingTarget := strings.TrimSpace(h.cfg.TunnelPing.TargetIP)
 	if pingTarget == "" && len(dev.PeerAllowedIPs) > 0 {
 		pingTarget = dev.PeerAllowedIPs[0]
 	}
 	h.pingTarget = pingTarget
 
 	if h.peerPubKey == "" {
-		h.state = StateUnknown
+		h.setState(StateUnknown)
 		h.mu.Unlock()
-		h.log.Warn("HUNTER", "No peer found on interface %s. Waiting for peer configuration...", iface)
+		h.log.Warn("HUNTER", "[%s] No peer found on interface %s. Waiting for peer configuration...", iface, iface)
 		return
 	}
 
 	isPrimary := dev.PublicKey < dev.PeerPublicKey
 
 	// 2. Check if tunnel is healthy:
-	// - Handshake was negotiated recently (HandshakeAge <= timeout) AND NOT zero, OR
-	// - Incoming traffic is actively flowing (rxProgress is true)
 	isHandshakeFresh := !dev.LastHandshake.IsZero() && dev.HandshakeAge <= timeout
 
 	if isHandshakeFresh || rxProgress {
 		if h.state == StateHunting || h.state == StateStalled {
 			remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
 			h.log.Info("HUNTER", "===============================================================")
-			h.log.Info("HUNTER", " WIREGUARD CONNECTED! Working 5-tuple: :%d -> %s (Handshake: %v ago)",
-				h.localPort, remoteEndpointStr, dev.HandshakeAge.Round(time.Millisecond))
+			h.log.Info("HUNTER", " [%s] WIREGUARD CONNECTED! Working 5-tuple: :%d -> %s (Handshake: %v ago)",
+				iface, h.localPort, remoteEndpointStr, dev.HandshakeAge.Round(time.Millisecond))
 			h.log.Info("HUNTER", "===============================================================")
 			h.successfulHunts++
 			h.currentAttempt = 0
@@ -431,28 +451,27 @@ func (h *Hunter) tick(ctx context.Context) {
 			remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
 			h.addEvent(StateConnected, dir, "Initial Handshake", fmt.Sprintf("Link active: :%d -> %s", h.localPort, remoteEndpointStr), 0)
 		}
-		h.state = StateConnected
+		h.setState(StateConnected)
 		h.failedPings = 0
 		h.mu.Unlock()
 		return
 	}
 
 	// 3. Handshake is stale or zero, and no incoming RX packets.
-	// Before deciding to hunt: verify if the peer responds to in-tunnel ping!
 	if pingEnabled && pingTarget != "" {
 		h.mu.Unlock()
 		pingOK := ping.Ping(ctx, pingTarget, pingTimeout)
 		h.mu.Lock()
 
 		if pingOK {
-			h.log.Debug("HUNTER", "Handshake stale (%v) but in-tunnel ping to %s succeeded; link is alive",
-				dev.HandshakeAge.Round(time.Second), pingTarget)
+			h.log.Debug("HUNTER", "[%s] Handshake stale (%v) but in-tunnel ping to %s succeeded; link is alive",
+				iface, dev.HandshakeAge.Round(time.Second), pingTarget)
 			h.failedPings = 0
 			if h.state == StateHunting || h.state == StateStalled {
 				remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
 				h.log.Info("HUNTER", "===============================================================")
-				h.log.Info("HUNTER", " WIREGUARD CONNECTED! In-tunnel ping to %s verified (5-tuple: :%d -> %s)",
-					pingTarget, h.localPort, remoteEndpointStr)
+				h.log.Info("HUNTER", " [%s] WIREGUARD CONNECTED! In-tunnel ping to %s verified (5-tuple: :%d -> %s)",
+					iface, pingTarget, h.localPort, remoteEndpointStr)
 				h.log.Info("HUNTER", "===============================================================")
 				h.successfulHunts++
 				h.currentAttempt = 0
@@ -472,15 +491,15 @@ func (h *Hunter) tick(ctx context.Context) {
 				remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
 				h.addEvent(StateConnected, dir, "Initial Ping", fmt.Sprintf("Ping verified: :%d -> %s", h.localPort, remoteEndpointStr), 0)
 			}
-			h.state = StateConnected
+			h.setState(StateConnected)
 			h.mu.Unlock()
 			return
 		}
 
 		// In-tunnel ping failed
 		h.failedPings++
-		h.log.Warn("HUNTER", "Tunnel unresponsive: handshake age %v, in-tunnel ping #%d/%d to %s failed",
-			dev.HandshakeAge.Round(time.Second), h.failedPings, threshold, pingTarget)
+		h.log.Warn("HUNTER", "[%s] Tunnel unresponsive: handshake age %v, in-tunnel ping #%d/%d to %s failed",
+			iface, dev.HandshakeAge.Round(time.Second), h.failedPings, threshold, pingTarget)
 
 		if h.failedPings < threshold {
 			// In grace verification period, do not hunt yet!
@@ -492,14 +511,14 @@ func (h *Hunter) tick(ctx context.Context) {
 				}
 				h.addEvent(StateDisconnected, h.lastDirection, "", fmt.Sprintf("in-tunnel ping #%d/%d failed", h.failedPings, threshold), uptimeSec)
 			}
-			h.state = StateStalled
+			h.setState(StateStalled)
 			h.lastHuntReason = fmt.Sprintf("verifying_stalled_ping_%d/%d", h.failedPings, threshold)
 			h.mu.Unlock()
 			return
 		}
 	}
 
-	// 4. Link is confirmed dead (failed pings reached threshold, or ping disabled)!
+	// 4. Link is confirmed dead!
 	stallReason := "handshake_expired"
 	if dev.LastHandshake.IsZero() {
 		stallReason = "no_handshake_ever"
@@ -515,7 +534,7 @@ func (h *Hunter) tick(ctx context.Context) {
 		}
 		h.addEvent(StateDisconnected, h.lastDirection, "", stallReason, uptimeSec)
 	}
-	h.state = StateHunting
+	h.setState(StateHunting)
 	attempt := h.currentAttempt
 	h.mu.Unlock()
 
@@ -529,7 +548,6 @@ func (h *Hunter) tick(ctx context.Context) {
 	isMyTurn := false
 
 	if attempt >= 4 {
-		// Both try with random backoff
 		isMyTurn = (rand.Intn(2) == 0)
 	} else if isPrimary && cycle == 0 {
 		isMyTurn = true
@@ -544,7 +562,7 @@ func (h *Hunter) tick(ctx context.Context) {
 		if isPrimary {
 			roleName = "Primary"
 		}
-		h.log.Debug("HUNTER", "Waiting for peer's staggered hunt window (My role: %s, Attempt: #%d)", roleName, attempt)
+		h.log.Debug("HUNTER", "[%s] Waiting for peer's staggered hunt window (My role: %s, Attempt: #%d)", iface, roleName, attempt)
 	}
 }
 
@@ -564,9 +582,9 @@ func (h *Hunter) determineDirection(currentRemotePort int) (string, string) {
 
 func (h *Hunter) executeHunt(reason string) {
 	h.mu.Lock()
-	iface := h.cfg.WireGuard.Interface
-	localRange := h.cfg.Iptables.PortRange
-	remoteRange := h.cfg.Hunter.RemotePortRange
+	iface := h.cfg.Interface
+	localRange := h.cfg.PortRange
+	remoteRange := h.cfg.RemotePortRange
 	targetIP := h.targetIP
 	peerKey := h.peerPubKey
 	h.totalHunts++
@@ -578,75 +596,85 @@ func (h *Hunter) executeHunt(reason string) {
 	h.mu.Unlock()
 
 	if targetIP == "" {
-		h.log.Warn("HUNTER", "Cannot hunt: remote IP is not yet known. Ensure WireGuard has an initial endpoint set.")
+		h.log.Warn("HUNTER", "[%s] Cannot hunt: remote IP is not yet known. Ensure WireGuard has an initial endpoint set.", iface)
 		return
 	}
 
 	newLocalPort, err := config.PickRandomPort(localRange)
 	if err != nil {
-		h.log.Error("HUNTER", "Failed to pick random local port from %s: %v", localRange, err)
+		h.log.Error("HUNTER", "[%s] Failed to pick random local port from %s: %v", iface, localRange, err)
 		return
 	}
 
 	newRemotePort, err := config.PickRandomPort(remoteRange)
 	if err != nil {
-		h.log.Error("HUNTER", "Failed to pick random remote port from %s: %v", remoteRange, err)
+		h.log.Error("HUNTER", "[%s] Failed to pick random remote port from %s: %v", iface, remoteRange, err)
 		return
 	}
 
 	newEndpoint := net.JoinHostPort(targetIP, strconv.Itoa(newRemotePort))
-	h.log.Info("HUNTER", "[Hunt #%d] Rotating 5-tuple: local :%d -> remote %s (Reason: %s)",
-		attempt, newLocalPort, newEndpoint, reason)
+	h.log.Info("HUNTER", "[%s] [Hunt #%d] Rotating 5-tuple: local :%d -> remote %s (Reason: %s)",
+		iface, attempt, newLocalPort, newEndpoint, reason)
 
-	// 1. Update local WireGuard ListenPort (busting client source-port DPI filter)
+	// 1. Update local WireGuard ListenPort
 	if err := h.wgCtrl.UpdateListenPort(iface, newLocalPort); err != nil {
-		h.log.Warn("HUNTER", "Failed to update local listen port: %v", err)
+		h.log.Error("HUNTER", "[%s] UpdateListenPort to %d failed: %v", iface, newLocalPort, err)
+	} else {
+		h.mu.Lock()
+		h.localPort = newLocalPort
+		h.mu.Unlock()
 	}
 
-	// 2. Synchronize iptables/ip6tables REDIRECT to the new ListenPort
-	h.mu.RLock()
-	iptEnabled := h.cfg.Iptables.Enabled
-	h.mu.RUnlock()
-	if iptEnabled {
-		if err := h.iptMgr.ApplyForwardingRule(localRange, newLocalPort); err != nil {
-			h.log.Warn("HUNTER", "Failed to sync iptables rule to port %d: %v", newLocalPort, err)
+	// 2. Sync iptables REDIRECT rule to match new listen port
+	if h.cfg.Iptables {
+		if err := h.iptMgr.ApplyForwardingRule(iface, localRange, newLocalPort); err != nil {
+			h.log.Warn("HUNTER", "[%s] Failed to sync iptables rule to port %d: %v", iface, newLocalPort, err)
+			h.mu.Lock()
+			h.iptablesActive = false
+			h.mu.Unlock()
+		} else {
+			h.mu.Lock()
+			h.iptablesActive = true
+			h.mu.Unlock()
 		}
 	}
 
-	// 3. Update remote peer Endpoint (destination port in peer's forwarded range)
+	// 3. Update remote peer endpoint to newly selected remote port
 	if err := h.wgCtrl.UpdatePeerEndpoint(iface, peerKey, newEndpoint); err != nil {
-		h.log.Warn("HUNTER", "Failed to update peer endpoint to %s: %v", newEndpoint, err)
+		h.log.Error("HUNTER", "[%s] UpdatePeerEndpoint failed: %v", iface, err)
+	} else {
+		h.mu.Lock()
+		h.remotePort = newRemotePort
+		h.lastDialedRemotePort = newRemotePort
+		h.lastDialedAt = time.Now()
+		h.mu.Unlock()
 	}
 
-	h.mu.Lock()
-	h.lastDialedRemotePort = newRemotePort
-	h.lastDialedAt = time.Now()
-	h.mu.Unlock()
-
-	// 4. Trigger handshake packet burst
-	h.triggerPacketBurst(targetIP, newRemotePort)
+	// 4. Send probe UDP packet
+	go h.sendProbePacket(newLocalPort, targetIP, newRemotePort)
 }
 
-func (h *Hunter) triggerPacketBurst(targetIP string, remotePort int) {
-	h.mu.RLock()
-	pingEnabled := h.cfg.Hunter.TunnelPing.Enabled
-	pingTarget := h.pingTarget
-	h.mu.RUnlock()
-
-	if pingEnabled && pingTarget != "" {
-		// Send small UDP ping through the tunnel to force immediate packet queuing
-		go func() {
-			pingAddr := net.JoinHostPort(strings.Trim(pingTarget, "[]"), "51820")
-			conn, err := net.DialTimeout("udp", pingAddr, 500*time.Millisecond)
-			if err == nil {
-				_, _ = conn.Write([]byte("wg-ping"))
-				_ = conn.Close()
-			}
-		}()
+func (h *Hunter) sendProbePacket(localPort int, targetIP string, remotePort int) {
+	localAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", localPort))
+	if err != nil {
+		return
 	}
+	remoteAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(targetIP, strconv.Itoa(remotePort)))
+	if err != nil {
+		return
+	}
+
+	conn, err := net.DialUDP("udp", localAddr, remoteAddr)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	probe := []byte{0x01, 0x00, 0x00, 0x00}
+	_, _ = conn.Write(probe)
 }
 
-// TriggerHunt manually triggers an immediate hunt cycle.
+// TriggerHunt initiates an immediate hunt cycle out-of-band.
 func (h *Hunter) TriggerHunt(reason string) {
 	select {
 	case h.manualTrigger <- reason:
@@ -654,79 +682,35 @@ func (h *Hunter) TriggerHunt(reason string) {
 	}
 }
 
-// TriggerRebind manually rotates only the local listen port.
-func (h *Hunter) TriggerRebind() {
+// TriggerRebind rotates the local listen port and updates iptables forwarding.
+func (h *Hunter) TriggerRebind() error {
 	h.mu.Lock()
-	iface := h.cfg.WireGuard.Interface
-	localRange := h.cfg.Iptables.PortRange
+	iface := h.cfg.Interface
+	localRange := h.cfg.PortRange
 	h.mu.Unlock()
 
 	newPort, err := config.PickRandomPort(localRange)
 	if err != nil {
-		h.log.Error("HUNTER", "Pick random port failed: %v", err)
-		return
+		return fmt.Errorf("pick random port: %w", err)
 	}
 
-	h.log.Info("HUNTER", "Manual rebind: setting local ListenPort to %d", newPort)
-	if err := h.wgCtrl.UpdateListenPort(iface, newPort); err != nil {
-		h.log.Error("HUNTER", "UpdateListenPort failed: %v", err)
-	}
-
-	h.mu.RLock()
-	iptEnabled := h.cfg.Iptables.Enabled
-	h.mu.RUnlock()
-	if iptEnabled {
-		if err := h.iptMgr.ApplyForwardingRule(localRange, newPort); err != nil {
-			h.log.Warn("HUNTER", "Failed to sync iptables rule to port %d: %v", newPort, err)
+	if h.wgCtrl != nil {
+		if err := h.wgCtrl.UpdateListenPort(iface, newPort); err != nil {
+			h.log.Warn("HUNTER", "[%s] UpdateListenPort failed: %v", iface, err)
 		}
 	}
-}
 
-// UpdateConfig updates the in-memory config and saves it to disk.
-func (h *Hunter) UpdateConfig(newCfg *config.Config) error {
-	config.SetDefaults(newCfg)
-
-	if err := config.SaveConfig(h.cfgPath, newCfg); err != nil {
-		return fmt.Errorf("save config: %w", err)
+	if h.cfg.Iptables && h.iptMgr != nil {
+		_ = h.iptMgr.ApplyForwardingRule(iface, localRange, newPort)
 	}
 
 	h.mu.Lock()
-	oldIptablesRange := h.cfg.Iptables.PortRange
-	oldIptablesEnabled := h.cfg.Iptables.Enabled
-	if newCfg.Hunter.HistoryFile != h.cfg.Hunter.HistoryFile {
-		h.historyFile = newCfg.Hunter.HistoryFile
-		if h.historyFile == "off" || h.historyFile == "none" {
-			h.historyFile = ""
-		}
-	}
-	h.cfg = newCfg
+	h.localPort = newPort
 	h.mu.Unlock()
-
-	h.log.Info("HUNTER", "Configuration updated and saved to %s", h.cfgPath)
-
-	// Reapply iptables if port range or enabled status changed
-	if newCfg.Iptables.Enabled != oldIptablesEnabled || newCfg.Iptables.PortRange != oldIptablesRange {
-		if !newCfg.Iptables.Enabled {
-			_ = h.iptMgr.RemoveRule()
-			h.mu.Lock()
-			h.iptablesActive = false
-			h.mu.Unlock()
-		} else {
-			h.applyIptablesRule()
-		}
-	}
-
 	return nil
 }
 
-// GetConfig returns a copy of current configuration.
-func (h *Hunter) GetConfig() config.Config {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return *h.cfg
-}
-
-// GetStatus returns the current status report for the web panel API.
+// GetStatus returns the current status report for this tunnel.
 func (h *Hunter) GetStatus() StatusReport {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -750,8 +734,9 @@ func (h *Hunter) GetStatus() StatusReport {
 	}
 
 	return StatusReport{
+		Interface:          h.cfg.Interface,
+		Name:               h.cfg.Name,
 		State:              h.state,
-		Interface:          h.cfg.WireGuard.Interface,
 		LocalPublicKey:     h.localPubKey,
 		PeerPublicKey:      h.peerPubKey,
 		TargetIP:           h.targetIP,
@@ -774,8 +759,20 @@ func (h *Hunter) GetStatus() StatusReport {
 		LastHuntTime:       h.lastHuntTime,
 		LastHuntReason:     h.lastHuntReason,
 		IptablesActive:     h.iptablesActive,
-		LocalPortRange:     h.cfg.Iptables.PortRange,
-		RemotePortRange:    h.cfg.Hunter.RemotePortRange,
+		LocalPortRange:     h.cfg.PortRange,
+		RemotePortRange:    h.cfg.RemotePortRange,
 		IsPrimary:          isPrimary,
 	}
+}
+
+// GetInterface returns the WireGuard interface name.
+func (h *Hunter) GetInterface() string {
+	return h.cfg.Interface
+}
+
+// GetState returns the current state.
+func (h *Hunter) GetState() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.state
 }

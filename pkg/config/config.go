@@ -13,134 +13,157 @@ import (
 )
 
 type Config struct {
-	WireGuard  WireGuardConfig  `yaml:"wireguard"`
-	Iptables   IptablesConfig   `yaml:"iptables"`
-	Hunter     HunterConfig     `yaml:"hunter"`
-	Web        WebConfig        `yaml:"web"`
-	StatusPage StatusPageConfig `yaml:"status_page"`
+	Mode       string           `yaml:"mode" json:"mode"` // "server" or "client" (default: "server")
+	PostUp     []string         `yaml:"post_up" json:"post_up"`
+	PreDown    []string         `yaml:"pre_down" json:"pre_down"`
+	Routing    RoutingConfig    `yaml:"routing" json:"routing"`
+	Tunnels    []TunnelConfig   `yaml:"tunnels" json:"tunnels"`
+	Web        WebConfig        `yaml:"web" json:"web"`
+	StatusPage StatusPageConfig `yaml:"status_page" json:"status_page"`
 }
 
-type WireGuardConfig struct {
-	Interface string `yaml:"interface"` // Interface name (default: "wg0")
-	Mode      string `yaml:"mode"`      // "wgctrl" (default) or "cli"
-	Command   string `yaml:"command"`   // "wg" (default) or "awg" (AmneziaWG)
+type RoutingConfig struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"` // Enable automatic default route switching (in client mode)
+	Table   int    `yaml:"table" json:"table"`     // Linux routing table to manage (e.g. 200, or 0 for main table)
+	Mode    string `yaml:"mode" json:"mode"`       // "sticky" (avoid flapping) or "priority" (prefer first tunnel)
+	Metric  int    `yaml:"metric" json:"metric"`   // Default route metric (default: 100)
 }
 
-type IptablesConfig struct {
-	Enabled   bool   `yaml:"enabled"`    // Automatically manage iptables redirect rule (default: true)
-	PortRange string `yaml:"port_range"` // Local forwarded range, e.g. "20000-30000"
-}
-
-type HunterConfig struct {
-	RemotePortRange  string           `yaml:"remote_port_range"` // Remote peer's forwarded port range
-	CheckInterval    time.Duration    `yaml:"check_interval"`    // Check frequency (default: 3s)
-	HandshakeTimeout time.Duration    `yaml:"handshake_timeout"` // Stale threshold to trigger hunt (default: 15s)
-	CycleTimeout     time.Duration    `yaml:"cycle_timeout"`     // Staggered turn duration (default: 8s)
-	TunnelPing       TunnelPingConfig `yaml:"tunnel_ping"`
-	HistoryFile      string           `yaml:"history_file"`      // Local path to persist connection events and stats (default: "history.json" in config dir)
+type TunnelConfig struct {
+	Interface        string           `yaml:"interface" json:"interface"` // Interface name, e.g. "wg0", "wgBridge"
+	Name             string           `yaml:"name" json:"name"`           // Descriptive name (e.g. "Client-A", "Frankfurt-Main")
+	PortRange        string           `yaml:"port_range" json:"port_range"` // Local forwarded port range
+	RemotePortRange  string           `yaml:"remote_port_range" json:"remote_port_range"` // Remote peer's port range
+	CheckInterval    time.Duration    `yaml:"check_interval" json:"check_interval"`       // Check frequency (default: 3s)
+	HandshakeTimeout time.Duration    `yaml:"handshake_timeout" json:"handshake_timeout"` // Stale handshake threshold (default: 60s)
+	CycleTimeout     time.Duration    `yaml:"cycle_timeout" json:"cycle_timeout"`         // Staggered turn duration (default: 8s)
+	TunnelPing       TunnelPingConfig `yaml:"tunnel_ping" json:"tunnel_ping"`
+	HistoryFile      string           `yaml:"history_file" json:"history_file"` // Persistent history file path
+	Iptables         bool             `yaml:"iptables" json:"iptables"`         // Manage iptables REDIRECT rule (default: true)
+	PostUp           []string         `yaml:"post_up" json:"post_up"`           // Per-tunnel post_up shell commands
+	PreDown          []string         `yaml:"pre_down" json:"pre_down"`         // Per-tunnel pre_down shell commands
 }
 
 type TunnelPingConfig struct {
-	Enabled          bool          `yaml:"enabled"`           // Active in-tunnel ICMP ping
-	TargetIP         string        `yaml:"target_ip"`         // In-tunnel IP of the remote peer to ping (e.g. "10.0.0.1")
-	Interval         time.Duration `yaml:"interval"`          // Ping interval (default: 2s)
-	Timeout          time.Duration `yaml:"timeout"`           // Single ping timeout (default: 2s)
-	FailureThreshold int           `yaml:"failure_threshold"` // Consecutive failed pings before hunt (default: 3)
+	Enabled          bool          `yaml:"enabled" json:"enabled"`                     // Active in-tunnel ICMP ping
+	TargetIP         string        `yaml:"target_ip" json:"target_ip"`                 // In-tunnel IP of the remote peer to ping
+	Interval         time.Duration `yaml:"interval" json:"interval"`                   // Ping interval (default: 2s)
+	Timeout          time.Duration `yaml:"timeout" json:"timeout"`                     // Single ping timeout (default: 2s)
+	FailureThreshold int           `yaml:"failure_threshold" json:"failure_threshold"` // Consecutive failed pings before hunt (default: 3)
 }
 
 type WebConfig struct {
-	Enabled    bool     `yaml:"enabled"`     // Enable web dashboard (default: true)
-	ListenAddr string   `yaml:"listen_addr"` // e.g. "0.0.0.0:8080"
-	Username   string   `yaml:"username"`    // Optional HTTP Basic Auth
-	Password   string   `yaml:"password"`
-	AllowedIPs []string `yaml:"allowed_ips"` // Whitelist of client IPs or CIDRs (e.g. ["127.0.0.1", "192.168.1.0/24"]). If empty, all IPs allowed.
-	HTTPS      bool     `yaml:"https"`       // Enable HTTPS/TLS (default: false)
-	CertFile   string   `yaml:"cert_file"`   // Path to SSL certificate (PEM)
-	KeyFile    string   `yaml:"key_file"`    // Path to SSL private key (PEM)
+	Enabled    bool     `yaml:"enabled" json:"enabled"`         // Enable web dashboard (default: true)
+	ListenAddr string   `yaml:"listen_addr" json:"listen_addr"` // e.g. "0.0.0.0:8080"
+	Username   string   `yaml:"username" json:"username"`       // Optional HTTP Basic Auth
+	Password   string   `yaml:"password" json:"password"`
+	AllowedIPs []string `yaml:"allowed_ips" json:"allowed_ips"` // Whitelist of client IPs or CIDRs
+	HTTPS      bool     `yaml:"https" json:"https"`             // Enable HTTPS/TLS (default: false)
+	CertFile   string   `yaml:"cert_file" json:"cert_file"`     // Path to SSL certificate (PEM)
+	KeyFile    string   `yaml:"key_file" json:"key_file"`       // Path to SSL private key (PEM)
 }
 
 type StatusPageConfig struct {
-	Enabled    bool   `yaml:"enabled"`     // Enable public status page (default: false)
-	ListenAddr string `yaml:"listen_addr"` // e.g. "0.0.0.0:8081" (or "0.0.0.0:8443" for HTTPS)
-	Title      string `yaml:"title"`       // Optional custom title (default: "Service Status")
-	HTTPS      bool   `yaml:"https"`       // Enable HTTPS/TLS (default: false)
-	CertFile   string `yaml:"cert_file"`   // Path to SSL certificate (PEM)
-	KeyFile    string `yaml:"key_file"`    // Path to SSL private key (PEM)
+	Enabled    bool   `yaml:"enabled" json:"enabled"`         // Enable isolated public status page (default: false)
+	ListenAddr string `yaml:"listen_addr" json:"listen_addr"` // e.g. "0.0.0.0:8081" (default: 8081, or 8443 if HTTPS)
+	Title      string `yaml:"title" json:"title"`             // Title displayed on status page (default: "Service Status")
+	HTTPS      bool   `yaml:"https" json:"https"`             // Enable HTTPS/TLS (default: false)
+	CertFile   string `yaml:"cert_file" json:"cert_file"`     // Path to SSL certificate (PEM)
+	KeyFile    string `yaml:"key_file" json:"key_file"`       // Path to SSL private key (PEM)
 }
 
-// LoadConfig reads and parses configuration from a YAML file.
+// LoadConfig reads and parses a YAML configuration file.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config file: %w", err)
+		return nil, fmt.Errorf("read config file %s: %w", path, err)
 	}
 
 	cfg := &Config{}
-	// Default TunnelPing to enabled before unmarshaling so it's on by default
-	cfg.Hunter.TunnelPing.Enabled = true
-
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config yaml: %w", err)
 	}
 
 	SetDefaults(cfg)
+	if err := Validate(cfg); err != nil {
+		return nil, fmt.Errorf("config validation failed: %w", err)
+	}
+
 	return cfg, nil
 }
 
-// SaveConfig serializes the configuration back to a YAML file.
+// SaveConfig serializes the configuration to disk.
 func SaveConfig(path string, cfg *Config) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal config yaml: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("write config file: %w", err)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("write config file %s: %w", path, err)
 	}
 
 	return nil
 }
 
-// SetDefaults applies sensible defaults to empty configuration fields.
+// SetDefaults assigns sensible defaults to unset configuration fields.
 func SetDefaults(cfg *Config) {
-	if cfg.WireGuard.Interface == "" {
-		cfg.WireGuard.Interface = "wg0"
+	if cfg.Mode == "" {
+		cfg.Mode = "server"
 	}
-	if cfg.WireGuard.Mode == "" {
-		cfg.WireGuard.Mode = "wgctrl"
-	}
-	if cfg.WireGuard.Command == "" {
-		cfg.WireGuard.Command = "wg"
+	cfg.Mode = strings.ToLower(cfg.Mode)
+	if cfg.Mode != "client" {
+		cfg.Mode = "server"
 	}
 
-	if cfg.Iptables.PortRange == "" {
-		cfg.Iptables.PortRange = "20000-30000"
+	if cfg.Mode == "client" {
+		if cfg.Routing.Mode == "" {
+			cfg.Routing.Mode = "sticky"
+		}
+		if cfg.Routing.Metric <= 0 {
+			cfg.Routing.Metric = 100
+		}
 	}
 
-	if cfg.Hunter.RemotePortRange == "" {
-		cfg.Hunter.RemotePortRange = "20000-30000"
-	}
-	if cfg.Hunter.CheckInterval == 0 {
-		cfg.Hunter.CheckInterval = 3 * time.Second
-	}
-	if cfg.Hunter.HandshakeTimeout == 0 {
-		cfg.Hunter.HandshakeTimeout = 60 * time.Second
-	}
-	if cfg.Hunter.CycleTimeout == 0 {
-		cfg.Hunter.CycleTimeout = 8 * time.Second
-	}
-	if cfg.Hunter.TunnelPing.Interval == 0 {
-		cfg.Hunter.TunnelPing.Interval = 2 * time.Second
-	}
-	if cfg.Hunter.TunnelPing.Timeout == 0 {
-		cfg.Hunter.TunnelPing.Timeout = 2 * time.Second
-	}
-	if cfg.Hunter.TunnelPing.FailureThreshold == 0 {
-		cfg.Hunter.TunnelPing.FailureThreshold = 3
+	for i := range cfg.Tunnels {
+		t := &cfg.Tunnels[i]
+		if t.PortRange == "" {
+			t.PortRange = "20000-30000"
+		}
+		if t.RemotePortRange == "" {
+			t.RemotePortRange = "20000-30000"
+		}
+		if t.CheckInterval <= 0 {
+			t.CheckInterval = 3 * time.Second
+		}
+		if t.HandshakeTimeout <= 0 {
+			t.HandshakeTimeout = 60 * time.Second
+		}
+		if t.CycleTimeout <= 0 {
+			t.CycleTimeout = 8 * time.Second
+		}
+		if t.TunnelPing.Enabled {
+			if t.TunnelPing.Interval <= 0 {
+				t.TunnelPing.Interval = 2 * time.Second
+			}
+			if t.TunnelPing.Timeout <= 0 {
+				t.TunnelPing.Timeout = 2 * time.Second
+			}
+			if t.TunnelPing.FailureThreshold <= 0 {
+				t.TunnelPing.FailureThreshold = 3
+			}
+		}
+		if t.Name == "" {
+			t.Name = t.Interface
+		}
 	}
 
 	if cfg.Web.ListenAddr == "" {
-		cfg.Web.ListenAddr = "0.0.0.0:8080"
+		if cfg.Web.HTTPS {
+			cfg.Web.ListenAddr = "0.0.0.0:8443"
+		} else {
+			cfg.Web.ListenAddr = "0.0.0.0:8080"
+		}
 	}
 
 	if cfg.StatusPage.ListenAddr == "" {
@@ -155,42 +178,86 @@ func SetDefaults(cfg *Config) {
 	}
 }
 
-// ParsePortRange splits a port range string like "20000-30000" or "20000:30000" into start and end integers.
-func ParsePortRange(rangeStr string) (int, int, error) {
-	rangeStr = strings.TrimSpace(rangeStr)
-	rangeStr = strings.ReplaceAll(rangeStr, ":", "-")
-	parts := strings.Split(rangeStr, "-")
+// Validate checks for configuration sanity, non-empty interfaces, unique names,
+// and ensures local port ranges do not overlap when iptables is active.
+func Validate(cfg *Config) error {
+	if len(cfg.Tunnels) == 0 {
+		return fmt.Errorf("at least one tunnel must be configured under 'tunnels:'")
+	}
+
+	seenIfaces := make(map[string]bool)
+	type portSpan struct {
+		iface string
+		start int
+		end   int
+	}
+	var spans []portSpan
+
+	for i, t := range cfg.Tunnels {
+		iface := strings.TrimSpace(t.Interface)
+		if iface == "" {
+			return fmt.Errorf("tunnel #%d missing 'interface'", i+1)
+		}
+		if seenIfaces[iface] {
+			return fmt.Errorf("duplicate interface %q configured", iface)
+		}
+		seenIfaces[iface] = true
+
+		if t.Iptables && t.PortRange != "" {
+			start, end, err := ParsePortRange(t.PortRange)
+			if err != nil {
+				return fmt.Errorf("tunnel %q port_range error: %w", iface, err)
+			}
+			for _, prev := range spans {
+				if start <= prev.end && prev.start <= end {
+					return fmt.Errorf("port_range conflict: tunnel %q (%d-%d) overlaps with tunnel %q (%d-%d)",
+						iface, start, end, prev.iface, prev.start, prev.end)
+				}
+			}
+			spans = append(spans, portSpan{iface: iface, start: start, end: end})
+		}
+	}
+
+	return nil
+}
+
+// ParsePortRange parses a range string like "20000-30000" into start and end integers.
+func ParsePortRange(spec string) (int, int, error) {
+	spec = strings.TrimSpace(spec)
+	spec = strings.ReplaceAll(spec, ":", "-")
+	parts := strings.Split(spec, "-")
 	if len(parts) != 2 {
-		return 0, 0, fmt.Errorf("invalid port range %q (expected format: start-end)", rangeStr)
+		return 0, 0, fmt.Errorf("invalid port range %q: expected format 'start-end' (e.g. 20000-30000)", spec)
 	}
 
 	start, err := strconv.Atoi(strings.TrimSpace(parts[0]))
 	if err != nil {
-		return 0, 0, fmt.Errorf("invalid start port in %q: %w", rangeStr, err)
+		return 0, 0, fmt.Errorf("invalid start port %q: %w", parts[0], err)
 	}
+
 	end, err := strconv.Atoi(strings.TrimSpace(parts[1]))
 	if err != nil {
-		return 0, 0, fmt.Errorf("invalid end port in %q: %w", rangeStr, err)
+		return 0, 0, fmt.Errorf("invalid end port %q: %w", parts[1], err)
 	}
 
 	if start < 1 || end > 65535 || start > end {
-		return 0, 0, fmt.Errorf("out-of-bounds port range %d-%d (must be 1-65535 and start <= end)", start, end)
+		return 0, 0, fmt.Errorf("invalid port range %d-%d: ports must be 1-65535 and start <= end", start, end)
 	}
 
 	return start, end, nil
 }
 
-// PickRandomPort picks a random integer within a port range.
-func PickRandomPort(rangeStr string) (int, error) {
-	start, end, err := ParsePortRange(rangeStr)
+// PickRandomPort selects a random uniform port within the given range string.
+func PickRandomPort(rangeSpec string) (int, error) {
+	start, end, err := ParsePortRange(rangeSpec)
 	if err != nil {
 		return 0, err
 	}
 
-	delta := int64(end - start + 1)
-	n, err := rand.Int(rand.Reader, big.NewInt(delta))
+	count := big.NewInt(int64(end - start + 1))
+	n, err := rand.Int(rand.Reader, count)
 	if err != nil {
-		return start, err
+		return 0, fmt.Errorf("crypto rand failure: %w", err)
 	}
 
 	return start + int(n.Int64()), nil

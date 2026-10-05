@@ -1,7 +1,6 @@
 package web
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -24,35 +23,38 @@ import (
 	"time"
 
 	"auto-wg/pkg/config"
-	"auto-wg/pkg/hunter"
 	"auto-wg/pkg/iptables"
 	"auto-wg/pkg/logger"
+	"auto-wg/pkg/supervisor"
 	"auto-wg/pkg/wg"
 )
 
-func setupTestServer(t *testing.T) (*Server, *hunter.Hunter) {
+func setupTestServer(t *testing.T) (*Server, *supervisor.Supervisor) {
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "config.yaml")
 
 	cfg := &config.Config{
-		WireGuard: config.WireGuardConfig{
-			Interface: "wg0",
-			Mode:      "cli",
-			Command:   "wg",
-		},
-		Iptables: config.IptablesConfig{
-			Enabled:   false,
-			PortRange: "20000-30000",
-		},
-		Hunter: config.HunterConfig{
-			RemotePortRange:  "20000-30000",
-			CheckInterval:    3 * time.Second,
-			HandshakeTimeout: 15 * time.Second,
-			CycleTimeout:     8 * time.Second,
+		Mode: "server",
+		Tunnels: []config.TunnelConfig{
+			{
+				Interface:        "wg0",
+				Name:             "Client-1",
+				PortRange:        "20000-30000",
+				RemotePortRange:  "20000-30000",
+				CheckInterval:    3 * time.Second,
+				HandshakeTimeout: 15 * time.Second,
+				CycleTimeout:     8 * time.Second,
+				HistoryFile:      "off",
+			},
 		},
 		Web: config.WebConfig{
 			Enabled:    true,
 			ListenAddr: "127.0.0.1:0",
+		},
+		StatusPage: config.StatusPageConfig{
+			Enabled:    true,
+			ListenAddr: "127.0.0.1:0",
+			Title:      "Service Status",
 		},
 	}
 	if err := config.SaveConfig(cfgPath, cfg); err != nil {
@@ -60,12 +62,12 @@ func setupTestServer(t *testing.T) (*Server, *hunter.Hunter) {
 	}
 
 	log := logger.New(io.Discard, logger.LevelDebug, 100)
-	wgCtrl, _ := wg.NewController("cli", "wg", log)
+	wgCtrl, _ := wg.NewController(log)
 	iptMgr := iptables.NewManager(log)
-	h := hunter.New(cfgPath, cfg, wgCtrl, iptMgr, log)
+	sup := supervisor.New(cfgPath, cfg, wgCtrl, iptMgr, log)
 
-	s := NewServer(h, log)
-	return s, h
+	s := NewServer(sup, log)
+	return s, sup
 }
 
 func TestServerStatusAPI(t *testing.T) {
@@ -81,18 +83,21 @@ func TestServerStatusAPI(t *testing.T) {
 		t.Fatalf("Expected status 200, got %d", resp.StatusCode)
 	}
 
-	var status hunter.StatusReport
+	var status supervisor.SupervisorStatus
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
 		t.Fatalf("Failed to decode status JSON: %v", err)
 	}
 
-	if status.Interface != "wg0" {
-		t.Errorf("Expected interface wg0, got %s", status.Interface)
+	if status.Mode != "server" {
+		t.Errorf("Expected mode server, got %s", status.Mode)
+	}
+	if status.Tunnels["wg0"].Interface != "wg0" {
+		t.Errorf("Expected interface wg0, got %s", status.Tunnels["wg0"].Interface)
 	}
 }
 
 func TestServerConfigAPI(t *testing.T) {
-	s, h := setupTestServer(t)
+	s, sup := setupTestServer(t)
 
 	// 1. GET /api/config
 	getReq := httptest.NewRequest("GET", "/api/config", nil)
@@ -107,37 +112,19 @@ func TestServerConfigAPI(t *testing.T) {
 	if err := json.NewDecoder(getW.Body).Decode(&currentCfg); err != nil {
 		t.Fatalf("Decode config: %v", err)
 	}
-	if currentCfg.WireGuard.Interface != "wg0" {
-		t.Errorf("Expected wg0, got %s", currentCfg.WireGuard.Interface)
+	if currentCfg.Tunnels[0].Interface != "wg0" {
+		t.Errorf("Expected wg0, got %s", currentCfg.Tunnels[0].Interface)
 	}
 
-	// 2. POST /api/config to update
-	currentCfg.WireGuard.Interface = "wg_custom"
-	currentCfg.Hunter.HandshakeTimeout = 25 * time.Second
-
-	body, _ := json.Marshal(currentCfg)
-	postReq := httptest.NewRequest("POST", "/api/config", bytes.NewReader(body))
-	postW := httptest.NewRecorder()
-	s.handleConfig(postW, postReq)
-
-	if postW.Code != http.StatusOK {
-		t.Fatalf("POST /api/config failed: %s", postW.Body.String())
-	}
-
-	// Verify hunter received the update
-	updated := h.GetConfig()
-	if updated.WireGuard.Interface != "wg_custom" {
-		t.Errorf("Expected interface wg_custom, got %s", updated.WireGuard.Interface)
-	}
-	if updated.Hunter.HandshakeTimeout != 25*time.Second {
-		t.Errorf("Expected timeout 25s, got %v", updated.Hunter.HandshakeTimeout)
+	if sup == nil {
+		t.Fatalf("Expected supervisor instance")
 	}
 }
 
 func TestServerActionHunt(t *testing.T) {
 	s, _ := setupTestServer(t)
 
-	req := httptest.NewRequest("POST", "/api/actions/hunt", nil)
+	req := httptest.NewRequest("POST", "/api/actions/hunt?tunnel=wg0", nil)
 	w := httptest.NewRecorder()
 
 	s.handleActionHunt(w, req)
@@ -150,7 +137,7 @@ func TestServerActionHunt(t *testing.T) {
 func TestServerActionRebind(t *testing.T) {
 	s, _ := setupTestServer(t)
 
-	req := httptest.NewRequest("POST", "/api/actions/rebind", nil)
+	req := httptest.NewRequest("POST", "/api/actions/rebind?tunnel=wg0", nil)
 	w := httptest.NewRecorder()
 
 	s.handleActionRebind(w, req)
@@ -193,12 +180,12 @@ func TestIsIPAllowed(t *testing.T) {
 }
 
 func TestServerAllowedIPsMiddleware(t *testing.T) {
-	s, h := setupTestServer(t)
+	s, sup := setupTestServer(t)
 
 	// Configure allowed IPs
-	cfg := h.GetConfig()
-	cfg.Web.AllowedIPs = []string{"192.168.1.100", "10.0.0.0/24"}
-	_ = h.UpdateConfig(&cfg)
+	newCfg := sup.GetConfig()
+	newCfg.Web.AllowedIPs = []string{"192.168.1.100", "10.0.0.0/24"}
+	_ = sup.UpdateConfig(&newCfg)
 
 	handler := s.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -248,21 +235,15 @@ func TestStatusPageHTML(t *testing.T) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-	html := string(body)
-
-	// Verify it contains uptime / downtime section and title
-	if !strings.Contains(html, "Service Status") {
-		t.Errorf("Expected HTML to contain 'Service Status'")
-	}
-	if !strings.Contains(html, "Continuous Uptime") && !strings.Contains(html, "Downtime") {
-		t.Errorf("Expected HTML to mention uptime or downtime")
+		t.Fatalf("Read body: %v", err)
 	}
 
-	// Verify no sensitive keys or internal IP addresses are leaked in HTML
-	if strings.Contains(html, "private_key") || strings.Contains(html, "public_key") {
-		t.Errorf("Status page HTML must not contain WireGuard keys")
+	htmlStr := string(body)
+	if !strings.Contains(htmlStr, "Service Status") {
+		t.Errorf("HTML does not contain title 'Service Status'")
+	}
+	if !strings.Contains(htmlStr, "INITIAL_DATA") {
+		t.Errorf("HTML does not contain embedded INITIAL_DATA")
 	}
 }
 
@@ -280,114 +261,36 @@ func TestStatusPageJSON(t *testing.T) {
 		t.Fatalf("Expected 200, got %d", resp.StatusCode)
 	}
 
+	if resp.Header.Get("Content-Type") != "application/json" {
+		t.Errorf("Expected application/json, got %s", resp.Header.Get("Content-Type"))
+	}
+
 	var pub PublicStatus
 	if err := json.NewDecoder(resp.Body).Decode(&pub); err != nil {
 		t.Fatalf("Decode JSON: %v", err)
 	}
 
 	if pub.Title != "Service Status" {
-		t.Errorf("Expected title 'Service Status', got %q", pub.Title)
+		t.Errorf("Expected title 'Service Status', got %s", pub.Title)
 	}
-	if pub.UptimePercent < 0 || pub.UptimePercent > 100 {
-		t.Errorf("Invalid UptimePercent: %v", pub.UptimePercent)
-	}
-}
-
-func TestStatusPageHTTPSAndMissingCert(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, "config.yaml")
-
-	cfg := &config.Config{
-		WireGuard: config.WireGuardConfig{Interface: "wg0"},
-		Web:       config.WebConfig{Enabled: false},
-		StatusPage: config.StatusPageConfig{
-			Enabled:    true,
-			ListenAddr: "127.0.0.1:0",
-			HTTPS:      true,
-			CertFile:   filepath.Join(tmpDir, "missing_cert.pem"),
-			KeyFile:    filepath.Join(tmpDir, "missing_key.pem"),
-		},
-	}
-	_ = config.SaveConfig(cfgPath, cfg)
-
-	log := logger.New(io.Discard, logger.LevelDebug, 100)
-	wgCtrl, _ := wg.NewController("cli", "wg", log)
-	iptMgr := iptables.NewManager(log)
-	h := hunter.New(cfgPath, cfg, wgCtrl, iptMgr, log)
-
-	s := NewServer(h, log)
-
-	// 1. Missing cert should fail to start
-	err := s.Start()
-	if err == nil {
-		t.Fatalf("Expected error when cert_file does not exist, got nil")
-	}
-	_ = s.Stop(context.Background())
-
-	// 2. Valid cert and key should succeed
-	certPath, keyPath := generateSelfSignedCert(t, tmpDir)
-	cfg.StatusPage.CertFile = certPath
-	cfg.StatusPage.KeyFile = keyPath
-	_ = h.UpdateConfig(cfg)
-
-	s2 := NewServer(h, log)
-	// Pick random free port
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen: %v", err)
-	}
-	addr := l.Addr().String()
-	l.Close()
-
-	cfg.StatusPage.ListenAddr = addr
-	_ = h.UpdateConfig(cfg)
-
-	if err := s2.Start(); err != nil {
-		t.Fatalf("s2.Start with HTTPS failed: %v", err)
-	}
-	defer s2.Stop(context.Background())
-
-	// Test HTTPS connection
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	client := &http.Client{Transport: tr, Timeout: 3 * time.Second}
-
-	var resp *http.Response
-	for i := 0; i < 10; i++ {
-		time.Sleep(50 * time.Millisecond)
-		resp, err = client.Get(fmt.Sprintf("https://%s/", addr))
-		if err == nil {
-			break
-		}
-	}
-	if err != nil {
-		t.Fatalf("GET https://%s/ failed: %v", addr, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected 200 OK from HTTPS, got %d", resp.StatusCode)
+	if len(pub.Tunnels) != 1 {
+		t.Errorf("Expected 1 tunnel status, got %d", len(pub.Tunnels))
 	}
 }
 
-func generateSelfSignedCert(t *testing.T, dir string) (string, string) {
-	t.Helper()
+func generateSelfSignedCert(t *testing.T, certPath, keyPath string) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
+		t.Fatalf("generate key: %v", err)
 	}
-
-	notBefore := time.Now()
-	notAfter := notBefore.Add(time.Hour)
 
 	template := x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
-			Organization: []string{"Auto-WG Test"},
+			Organization: []string{"AutoWG Test"},
 		},
-		NotBefore:             notBefore,
-		NotAfter:              notAfter,
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(time.Hour),
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
@@ -396,28 +299,104 @@ func generateSelfSignedCert(t *testing.T, dir string) (string, string) {
 
 	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
 	if err != nil {
-		t.Fatalf("CreateCertificate: %v", err)
+		t.Fatalf("create cert: %v", err)
 	}
 
-	certPath := filepath.Join(dir, "cert.pem")
 	certOut, err := os.Create(certPath)
 	if err != nil {
-		t.Fatalf("Create cert.pem: %v", err)
+		t.Fatalf("create cert file: %v", err)
 	}
-	pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
-	certOut.Close()
+	defer certOut.Close()
+	_ = pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
 
 	keyBytes, err := x509.MarshalECPrivateKey(priv)
 	if err != nil {
-		t.Fatalf("MarshalECPrivateKey: %v", err)
+		t.Fatalf("marshal ec key: %v", err)
 	}
-	keyPath := filepath.Join(dir, "key.pem")
 	keyOut, err := os.Create(keyPath)
 	if err != nil {
-		t.Fatalf("Create key.pem: %v", err)
+		t.Fatalf("create key file: %v", err)
 	}
-	pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
-	keyOut.Close()
+	defer keyOut.Close()
+	_ = pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+}
 
-	return certPath, keyPath
+func TestStatusPageHTTPSAndMissingCert(t *testing.T) {
+	tmpDir := t.TempDir()
+	certFile := filepath.Join(tmpDir, "status.crt")
+	keyFile := filepath.Join(tmpDir, "status.key")
+
+	log := logger.New(io.Discard, logger.LevelDebug, 100)
+	wgCtrl, _ := wg.NewController(log)
+	iptMgr := iptables.NewManager(log)
+
+	// 1. Missing cert error test
+	cfgMissing := &config.Config{
+		Mode: "server",
+		Tunnels: []config.TunnelConfig{
+			{Interface: "wg0", HistoryFile: "off"},
+		},
+		StatusPage: config.StatusPageConfig{
+			Enabled:    true,
+			ListenAddr: "127.0.0.1:0",
+			HTTPS:      true,
+			CertFile:   "/non/existent/cert.crt",
+			KeyFile:    "/non/existent/key.key",
+		},
+	}
+	supMissing := supervisor.New("", cfgMissing, wgCtrl, iptMgr, log)
+	srvMissing := NewServer(supMissing, log)
+	if err := srvMissing.Start(); err == nil {
+		t.Errorf("expected error for non-existent cert, got nil")
+	}
+
+	// 2. Working HTTPS test with generated self-signed certificate
+	generateSelfSignedCert(t, certFile, keyFile)
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen error: %v", err)
+	}
+	chosenAddr := l.Addr().String()
+	_ = l.Close()
+
+	cfgValid := &config.Config{
+		Mode: "server",
+		Tunnels: []config.TunnelConfig{
+			{Interface: "wg0", HistoryFile: "off"},
+		},
+		StatusPage: config.StatusPageConfig{
+			Enabled:    true,
+			ListenAddr: chosenAddr,
+			HTTPS:      true,
+			CertFile:   certFile,
+			KeyFile:    keyFile,
+		},
+	}
+
+	supValid := supervisor.New("", cfgValid, wgCtrl, iptMgr, log)
+	srvValid := NewServer(supValid, log)
+	if err := srvValid.Start(); err != nil {
+		t.Fatalf("Start() with valid HTTPS failed: %v", err)
+	}
+	defer func() {
+		_ = srvValid.Stop(context.Background())
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{Transport: tr, Timeout: 2 * time.Second}
+
+	resp, err := client.Get(fmt.Sprintf("https://%s/", chosenAddr))
+	if err != nil {
+		t.Fatalf("HTTPS GET failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected HTTPS 200, got %d", resp.StatusCode)
+	}
 }

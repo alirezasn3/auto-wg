@@ -1,0 +1,72 @@
+# ==============================================================================
+# Auto-WG Client Configuration (Upstream Failover & Routing Table 200)
+# ==============================================================================
+
+# Operation mode: "client" (one of multiple upstream connections is chosen based on availability)
+mode: "client"
+
+# Shell commands executed when Auto-WG starts (PostUp)
+# Perfect for setting up policy routing (e.g., Table 200), firewall rules, and NAT
+post_up:
+  - "ip rule add to 10.0.0.1 lookup local priority 100"
+  - "ip rule add from 10.0.0.0/16 lookup 200 priority 200"
+  - "ip rule add to 192.168.69.0/24 lookup 200 priority 201"
+  - "ip route add 10.0.0.0/16 dev wgServer table 200"
+  - "iptables -t nat -I POSTROUTING -o wgBridge+ -j MASQUERADE"
+  - "ufw route allow in on wgServer out on wgBridge+"
+  - "ufw route allow in on wgBridge+ out on ens192"
+
+# Shell commands executed when Auto-WG shuts down (PreDown)
+pre_down:
+  - "iptables -t nat -D POSTROUTING -o wgBridge+ -j MASQUERADE"
+  - "ip rule del from 10.0.0.0/16 lookup 200 priority 200"
+  - "ip rule del to 10.0.0.1 lookup local priority 100"
+  - "ip rule del to 192.168.69.0/24 lookup 200 priority 201"
+
+# Automatic route management
+routing:
+  enabled: true             # Automatically manage default route failover
+  table: 200                # Target routing table (e.g. 200, leaves host main table and SSH untouched)
+  mode: "sticky"            # "sticky" (stay on active until it fails, avoiding flaps) or "priority" (prefer first tunnel)
+  metric: 100               # Default route metric
+
+# Upstream tunnels to foreign servers
+tunnels:
+  - interface: "wgBridge0"
+    name: "Upstream-Main"
+    port_range: "20000-24999"
+    remote_port_range: "20000-24999"
+    handshake_timeout: 60s
+    cycle_timeout: 8s
+    check_interval: 3s
+    tunnel_ping:
+      enabled: true
+      target_ip: "10.100.0.1" # In-tunnel IP of upstream server
+      interval: 2s
+      failure_threshold: 3
+    history_file: "history-wgBridge0.json"
+    iptables: true
+
+  - interface: "wgBridge1"
+    name: "Upstream-Backup"
+    port_range: "25000-29999"
+    remote_port_range: "25000-29999"
+    handshake_timeout: 60s
+    cycle_timeout: 8s
+    check_interval: 3s
+    tunnel_ping:
+      enabled: true
+      target_ip: "10.200.0.1"
+      interval: 2s
+      failure_threshold: 3
+    history_file: "history-wgBridge1.json"
+    iptables: true
+
+web:
+  enabled: true
+  listen_addr: "127.0.0.1:8080"
+
+status_page:
+  enabled: true
+  listen_addr: "0.0.0.0:8081"
+  title: "Upstream Bridge Status"

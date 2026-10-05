@@ -265,6 +265,88 @@
       color: var(--text-muted);
     }
 
+    /* Multi-Tunnel Services */
+    .services-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .services-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .services-header h3 {
+      font-size: 13.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--text-main);
+    }
+
+    .services-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .service-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--bg-primary);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 12.5px;
+    }
+
+    .service-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .service-name {
+      font-weight: 600;
+      color: var(--text-main);
+    }
+
+    .service-badge-active {
+      font-size: 10.5px;
+      font-weight: 700;
+      color: var(--accent);
+      background: rgba(56, 189, 248, 0.15);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      padding: 2px 7px;
+      border-radius: 10px;
+    }
+
+    .service-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .service-uptime {
+      color: var(--text-muted);
+    }
+
+    .service-pct {
+      color: #fff;
+      font-weight: 700;
+    }
+
     /* Incident / Interruption History */
     .history-card {
       background: var(--bg-card);
@@ -438,8 +520,8 @@
       <div class="banner-top">
         <span class="status-icon" id="statusIcon">{{if .Connected}}🟢{{else}}🔴{{end}}</span>
         <div class="banner-text">
-          <h2 id="statusHeadline">{{if .Connected}}All Systems Operational{{else}}Service Interruption{{end}}</h2>
-          <p id="statusDescription">{{if .Connected}}The tunnel is active and passing traffic.{{else}}The tunnel is interrupted; automatic port recovery in progress.{{end}}</p>
+          <h2 id="statusHeadline">{{.StatusMessage}}</h2>
+          <p id="statusDescription">{{.StatusDescription}}</p>
         </div>
       </div>
 
@@ -466,6 +548,15 @@
         <span class="metric-value" id="metricLastDowntime">{{if .LastDowntimeFormatted}}{{.LastDowntimeFormatted}}{{else}}None{{end}}</span>
         <span class="metric-meta" id="metricLastDowntimeAgo">{{if .LastDowntimeAgo}}{{.LastDowntimeAgo}}{{else}}No outages recorded{{end}}</span>
       </div>
+    </section>
+
+    <!-- Multi-Tunnel Services (displayed when 2 or more tunnels exist) -->
+    <section class="services-card" id="servicesCard" style="display: none;">
+      <div class="services-header">
+        <h3 id="lblServicesTitle">Managed Tunnels & Services</h3>
+        <span class="history-count" id="servicesCount">0 tunnels</span>
+      </div>
+      <div class="services-list" id="servicesList"></div>
     </section>
 
     <!-- History / Incidents -->
@@ -523,8 +614,9 @@
           liveMonitoring: 'Live Monitoring',
           allOperational: 'All Systems Operational',
           serviceInterruption: 'Service Interruption',
-          operationalDesc: 'The tunnel is active and passing traffic.',
-          interruptedDesc: 'The tunnel is interrupted; automatic port recovery in progress.',
+          partialDisruption: 'Partial Service Disruption',
+          operationalDesc: 'All tunnels are active and healthy.',
+          interruptedDesc: 'Tunnels are interrupted; automatic port recovery in progress.',
           continuousUptime: 'Continuous Uptime',
           downtimeInProgress: 'Downtime in Progress',
           connectedSince: 'Connected since ',
@@ -536,6 +628,9 @@
           lastInterruption: 'Last Interruption',
           none: 'None',
           noOutages: 'No outages recorded',
+          servicesTitle: 'Managed Tunnels & Services',
+          activeRoute: 'Active Route',
+          tunnelStatusCount: count => `${count} tunnel${count === 1 ? '' : 's'}`,
           historyTitle: 'Recent Interruption & Recovery History',
           noEvents: 'No interruptions recorded yet. Service is 100% operational.',
           eventsCount: count => `${count} event${count === 1 ? '' : 's'}`,
@@ -546,9 +641,10 @@
         fa: {
           langBtn: 'EN',
           liveMonitoring: 'پایش زنده',
-          allOperational: 'تمامی سرویس‌ها فعال هستند',
+          allOperational: 'تمامی سیستم‌ها فعال هستند',
           serviceInterruption: 'اختلال در اتصال سرویس',
-          operationalDesc: 'تونل فعال است و تبادل داده بدون وقفه انجام می‌شود.',
+          partialDisruption: 'اختلال جزئی در سرویس',
+          operationalDesc: 'تمامی تونل‌ها فعال بوده و تبادل داده بدون وقفه انجام می‌شود.',
           interruptedDesc: 'اتصال موقتاً قطع شده است؛ بازیابی خودکار پورت در حال انجام است.',
           continuousUptime: 'مدت زمان پایداری مداوم',
           downtimeInProgress: 'مدت زمان قطعی فعلی',
@@ -561,6 +657,9 @@
           lastInterruption: 'آخرین قطعی ثبت‌شده',
           none: 'بدون اختلال',
           noOutages: 'هیچ قطعی ثبت نشده است',
+          servicesTitle: 'سرویس‌ها و تونل‌های فعال',
+          activeRoute: 'مسیر فعال',
+          tunnelStatusCount: count => `${toPersianDigits(count)} تونل`,
           historyTitle: 'تاریخچه اختلالات و بازیابی‌های اخیر',
           noEvents: 'تاکنون هیچ اختلالی ثبت نشده است. سرویس با پایداری ۱۰۰٪ فعال است.',
           eventsCount: count => `${toPersianDigits(count)} رویداد`,
@@ -700,8 +799,8 @@
         if (data.connected) {
           banner.className = 'status-banner is-operational';
           icon.textContent = '🟢';
-          headline.textContent = t.allOperational;
-          desc.textContent = t.operationalDesc;
+          headline.textContent = data.status_message || t.allOperational;
+          desc.textContent = data.status_description || t.operationalDesc;
           uptimeLabel.textContent = t.continuousUptime;
           if (data.last_connected_at) {
             uptimeSub.textContent = t.connectedSince + formatRelativeTime(data.last_connected_at, currentLang);
@@ -711,8 +810,8 @@
         } else {
           banner.className = 'status-banner is-disrupted';
           icon.textContent = '🔴';
-          headline.textContent = t.serviceInterruption;
-          desc.textContent = t.interruptedDesc;
+          headline.textContent = data.status_message || t.serviceInterruption;
+          desc.textContent = data.status_description || t.interruptedDesc;
           uptimeLabel.textContent = t.downtimeInProgress;
           if (data.last_disconnected_at) {
             uptimeSub.textContent = t.disconnectedSince + formatRelativeTime(data.last_disconnected_at, currentLang);
@@ -745,7 +844,43 @@
           }
         }
 
-        // 3. Events Timeline
+        // 3. Multi-Tunnel Services Section (shown when 2+ tunnels exist)
+        const servicesCard = document.getElementById('servicesCard');
+        const servicesList = document.getElementById('servicesList');
+        const servicesCount = document.getElementById('servicesCount');
+        const lblServices = document.getElementById('lblServicesTitle');
+        if (lblServices) lblServices.textContent = t.servicesTitle;
+
+        if (servicesCard && servicesList && data.tunnels && data.tunnels.length > 1) {
+          servicesCard.style.display = 'flex';
+          if (servicesCount) servicesCount.textContent = t.tunnelStatusCount(data.tunnels.length);
+          let sHtml = '';
+          for (const tn of data.tunnels) {
+            const isConn = tn.connected;
+            const dotClass = isConn ? 'connected' : 'disconnected';
+            const pctStr = tn.uptime_percent !== undefined ? tn.uptime_percent.toFixed(2) : '100.00';
+            const formattedPct = currentLang === 'fa' ? `${toPersianDigits(pctStr)}٪` : `${pctStr}%`;
+            const activeBadge = tn.is_active_route ? `<span class="service-badge-active">${t.activeRoute}</span>` : '';
+            sHtml += `
+              <div class="service-row">
+                <div class="service-left">
+                  <span class="event-dot ${dotClass}"></span>
+                  <span class="service-name">${escapeHtml(tn.name || tn.interface)}</span>
+                  ${activeBadge}
+                </div>
+                <div class="service-right">
+                  <span class="service-uptime">${escapeHtml(tn.uptime_formatted || '')}</span>
+                  <span class="service-pct">${formattedPct}</span>
+                </div>
+              </div>
+            `;
+          }
+          servicesList.innerHTML = sHtml;
+        } else if (servicesCard) {
+          servicesCard.style.display = 'none';
+        }
+
+        // 4. Events Timeline
         const count = document.getElementById('historyCount');
         if (count && data.events) {
           count.textContent = t.eventsCount(data.events.length);
@@ -764,20 +899,21 @@
               let dur = ev.duration;
 
               if (currentLang === 'fa') {
+                const ifaceTag = ev.interface ? `[${ev.interface}] ` : '';
                 if (isConn) {
                   if (ev.duration_sec > 0) {
-                    msg = 'اتصال مجدداً برقرار شد';
+                    msg = `${ifaceTag}اتصال مجدداً برقرار شد`;
                     dur = `مدت قطعی: ${formatDuration(ev.duration_sec, 'fa')}`;
                   } else {
-                    msg = 'اتصال برقرار شد';
+                    msg = `${ifaceTag}اتصال برقرار شد`;
                     dur = '';
                   }
                 } else {
                   if (ev.duration_sec > 0) {
-                    msg = 'اختلال در اتصال سرویس';
+                    msg = `${ifaceTag}اختلال در اتصال سرویس`;
                     dur = `مدت پایداری: ${formatDuration(ev.duration_sec, 'fa')}`;
                   } else {
-                    msg = 'اختلال در اتصال سرویس';
+                    msg = `${ifaceTag}اختلال در اتصال سرویس`;
                     dur = '';
                   }
                 }

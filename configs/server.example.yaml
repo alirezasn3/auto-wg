@@ -1,0 +1,58 @@
+# ==============================================================================
+# Auto-WG Server Configuration (One Server -> Multiple Clients)
+# ==============================================================================
+
+# Operation mode: "server" (maintains connections to one or more clients)
+mode: "server"
+
+# Optional shell commands executed after tunnels start (PostUp) and before stop (PreDown)
+post_up:
+  - "echo 'Auto-WG Server Started'"
+
+pre_down:
+  - "echo 'Auto-WG Server Stopping'"
+
+# Managed client interfaces (each with disjoint port slices)
+tunnels:
+  - interface: "wg0"
+    name: "Client-Alpha"
+    port_range: "20000-24999"
+    remote_port_range: "20000-24999"
+    handshake_timeout: 60s
+    cycle_timeout: 8s
+    check_interval: 3s
+    tunnel_ping:
+      enabled: true
+      target_ip: "10.0.0.2" # In-tunnel IP of Client Alpha
+      interval: 2s
+      failure_threshold: 3
+    history_file: "history-wg0.json"
+    iptables: true
+
+  - interface: "wg1"
+    name: "Client-Bravo"
+    port_range: "25000-29999"
+    remote_port_range: "25000-29999"
+    handshake_timeout: 60s
+    cycle_timeout: 8s
+    check_interval: 3s
+    tunnel_ping:
+      enabled: true
+      target_ip: "10.1.0.2" # In-tunnel IP of Client Bravo
+      interval: 2s
+      failure_threshold: 3
+    history_file: "history-wg1.json"
+    iptables: true
+
+web:
+  enabled: true
+  listen_addr: "0.0.0.0:8080"
+  allowed_ips:
+    - "127.0.0.1"
+    - "10.0.0.0/8"
+    - "192.168.0.0/16"
+
+status_page:
+  enabled: true
+  listen_addr: "0.0.0.0:8081"
+  title: "VPN Gateway Status"

@@ -12,80 +12,59 @@ import (
 	"auto-wg/pkg/wg"
 )
 
-func TestHunterStatusReportAndConfigUpdate(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, "config.yaml")
-
-	cfg := &config.Config{
-		WireGuard: config.WireGuardConfig{
-			Interface: "wg0",
-			Mode:      "cli",
-			Command:   "wg",
-		},
-		Iptables: config.IptablesConfig{
-			Enabled:   false,
-			PortRange: "20000-30000",
-		},
-		Hunter: config.HunterConfig{
-			RemotePortRange:  "20000-30000",
-			CheckInterval:    3 * time.Second,
-			HandshakeTimeout: 15 * time.Second,
-			CycleTimeout:     8 * time.Second,
-		},
-		Web: config.WebConfig{
-			Enabled:    true,
-			ListenAddr: "127.0.0.1:8080",
-		},
-	}
-	if err := config.SaveConfig(cfgPath, cfg); err != nil {
-		t.Fatalf("SaveConfig failed: %v", err)
-	}
-
+func TestHunterStatusReportAndBasics(t *testing.T) {
 	log := logger.New(io.Discard, logger.LevelDebug, 100)
-	wgCtrl, _ := wg.NewController("cli", "wg", log)
+	wgCtrl, _ := wg.NewController(log)
 	iptMgr := iptables.NewManager(log)
 
-	h := New(cfgPath, cfg, wgCtrl, iptMgr, log)
+	tunnelCfg := config.TunnelConfig{
+		Interface:        "wg0",
+		Name:             "Client-A",
+		PortRange:        "20000-30000",
+		RemotePortRange:  "20000-30000",
+		CheckInterval:    3 * time.Second,
+		HandshakeTimeout: 15 * time.Second,
+		CycleTimeout:     8 * time.Second,
+		HistoryFile:      "off",
+	}
+
+	var stateChanges []string
+	handler := func(h *Hunter, oldState, newState string) {
+		stateChanges = append(stateChanges, newState)
+	}
+
+	h := New(tunnelCfg, wgCtrl, iptMgr, log, handler)
 
 	status := h.GetStatus()
 	if status.Interface != "wg0" {
 		t.Errorf("Expected interface wg0, got %s", status.Interface)
 	}
+	if status.Name != "Client-A" {
+		t.Errorf("Expected name Client-A, got %s", status.Name)
+	}
 	if status.State != StateUnknown {
 		t.Errorf("Expected initial state %s, got %s", StateUnknown, status.State)
 	}
 
-	// Test update config
-	newCfg := *cfg
-	newCfg.Hunter.HandshakeTimeout = 40 * time.Second
-	if err := h.UpdateConfig(&newCfg); err != nil {
-		t.Fatalf("UpdateConfig failed: %v", err)
+	h.setState(StateConnected)
+	time.Sleep(10 * time.Millisecond) // wait for async state callback
+	if h.GetState() != StateConnected {
+		t.Errorf("Expected state %s, got %s", StateConnected, h.GetState())
 	}
-
-	readBack := h.GetConfig()
-	if readBack.Hunter.HandshakeTimeout != 40*time.Second {
-		t.Errorf("Expected updated timeout 40s, got %v", readBack.Hunter.HandshakeTimeout)
-	}
-
-	newCfg.Hunter.TunnelPing.TargetIP = "10.0.0.5"
-	if err := h.UpdateConfig(&newCfg); err != nil {
-		t.Fatalf("UpdateConfig with TargetIP failed: %v", err)
-	}
-
-	readBack = h.GetConfig()
-	if readBack.Hunter.TunnelPing.TargetIP != "10.0.0.5" {
-		t.Errorf("Expected updated TargetIP 10.0.0.5, got %s", readBack.Hunter.TunnelPing.TargetIP)
+	if len(stateChanges) == 0 || stateChanges[len(stateChanges)-1] != StateConnected {
+		t.Errorf("Expected stateChange event CONNECTED, got: %v", stateChanges)
 	}
 }
 
 func TestHunterEventsAndDirection(t *testing.T) {
 	log := logger.New(io.Discard, logger.LevelDebug, 100)
-	wgCtrl, _ := wg.NewController("cli", "wg", log)
+	wgCtrl, _ := wg.NewController(log)
 	iptMgr := iptables.NewManager(log)
-	cfg := &config.Config{
-		WireGuard: config.WireGuardConfig{Interface: "wg0"},
+	tunnelCfg := config.TunnelConfig{
+		Interface:   "wg0",
+		HistoryFile: "off",
 	}
-	h := New("", cfg, wgCtrl, iptMgr, log)
+	h := New(tunnelCfg, wgCtrl, iptMgr, log, nil)
 	h.localPubKey = "AAAA"
 	h.peerPubKey = "BBBB"
 
@@ -120,7 +99,6 @@ func TestHunterEventsAndDirection(t *testing.T) {
 	if len(st.Events) != 50 {
 		t.Errorf("expected events capped at 50, got %d", len(st.Events))
 	}
-	// Most recent event is at index 0
 	if st.Events[0].DurationSec != 59 {
 		t.Errorf("expected newest event duration 59, got %v", st.Events[0].DurationSec)
 	}
@@ -134,18 +112,16 @@ func TestHunterHistoryPersistence(t *testing.T) {
 	histFile := filepath.Join(tmpDir, "history.json")
 
 	log := logger.New(io.Discard, logger.LevelDebug, 100)
-	wgCtrl, _ := wg.NewController("cli", "wg", log)
+	wgCtrl, _ := wg.NewController(log)
 	iptMgr := iptables.NewManager(log)
 
-	cfg := &config.Config{
-		WireGuard: config.WireGuardConfig{Interface: "wg0"},
-		Hunter: config.HunterConfig{
-			HistoryFile: histFile,
-		},
+	tunnelCfg := config.TunnelConfig{
+		Interface:   "wg0",
+		HistoryFile: histFile,
 	}
 
 	// Instance 1: Generate some events and stats
-	h1 := New("", cfg, wgCtrl, iptMgr, log)
+	h1 := New(tunnelCfg, wgCtrl, iptMgr, log, nil)
 	h1.localPubKey = "PEER_A"
 	h1.peerPubKey = "PEER_B"
 	connectedTime := time.Now().Add(-2 * time.Hour)
@@ -162,8 +138,8 @@ func TestHunterHistoryPersistence(t *testing.T) {
 		t.Fatalf("SaveHistory failed: %v", err)
 	}
 
-	// Instance 2: Start new hunter with same config and history file
-	h2 := New("", cfg, wgCtrl, iptMgr, log)
+	// Instance 2: Start new hunter with same history file
+	h2 := New(tunnelCfg, wgCtrl, iptMgr, log, nil)
 	st2 := h2.GetStatus()
 
 	if st2.TotalHunts != 12 {
@@ -192,4 +168,3 @@ func TestHunterHistoryPersistence(t *testing.T) {
 		t.Errorf("expected new event ID %d > previous event ID %d", st2Updated.Events[0].ID, st2Updated.Events[1].ID)
 	}
 }
-
