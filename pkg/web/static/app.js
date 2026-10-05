@@ -19,6 +19,14 @@ class AutoWGApp {
   }
 
   initElements() {
+    // Multi-Tunnel Switcher Elements
+    this.tunnelSwitcherCard = document.getElementById('tunnelSwitcherCard');
+    this.tunnelTabs = document.getElementById('tunnelTabs');
+    this.switcherModeTag = document.getElementById('switcherModeTag');
+    this.switcherActiveRouteBadge = document.getElementById('switcherActiveRouteBadge');
+    this.tunnelHeaderActions = document.getElementById('tunnelHeaderActions');
+    this.selectedTunnel = null;
+
     // Header & Clock
     this.serverClock = document.getElementById('serverClock');
 
@@ -149,6 +157,14 @@ class AutoWGApp {
     }, 3000);
   }
 
+  getSelectedTunnelData() {
+    if (!this.currentData) return null;
+    if (this.currentData.tunnels && this.selectedTunnel && this.currentData.tunnels[this.selectedTunnel]) {
+      return this.currentData.tunnels[this.selectedTunnel];
+    }
+    return this.currentData;
+  }
+
   initCopyButtons() {
     const setupCopy = (btnId, textGetter, label) => {
       const btn = document.getElementById(btnId);
@@ -173,18 +189,19 @@ class AutoWGApp {
       });
     };
 
-    setupCopy('btnCopyLocalKey', () => this.currentData?.local_public_key || '', 'Local Key');
-    setupCopy('btnCopyPeerKey', () => this.currentData?.peer_public_key || '', 'Peer Key');
-    setupCopy('btnCopyTargetIP', () => this.currentData?.target_ip || '', 'Target IP');
+    setupCopy('btnCopyLocalKey', () => this.getSelectedTunnelData()?.local_public_key || '', 'Local Key');
+    setupCopy('btnCopyPeerKey', () => this.getSelectedTunnelData()?.peer_public_key || '', 'Peer Key');
+    setupCopy('btnCopyTargetIP', () => this.getSelectedTunnelData()?.target_ip || '', 'Target IP');
   }
 
   initActions() {
     this.btnRebind.addEventListener('click', async () => {
       this.btnRebind.disabled = true;
       try {
-        const res = await fetch('/api/actions/rebind', { method: 'POST' });
+        const ifaceParam = this.selectedTunnel ? `?interface=${encodeURIComponent(this.selectedTunnel)}` : '';
+        const res = await fetch(`/api/actions/rebind${ifaceParam}`, { method: 'POST' });
         if (res.ok) {
-          this.showToast('⚡ Local source port rebind initiated');
+          this.showToast(`⚡ Local source port rebind initiated${this.selectedTunnel ? ` for ${this.selectedTunnel}` : ''}`);
           this.pollStatus();
         } else {
           this.showToast('Failed to trigger rebind', true);
@@ -199,9 +216,10 @@ class AutoWGApp {
     this.btnHunt.addEventListener('click', async () => {
       this.btnHunt.disabled = true;
       try {
-        const res = await fetch('/api/actions/hunt', { method: 'POST' });
+        const ifaceParam = this.selectedTunnel ? `?interface=${encodeURIComponent(this.selectedTunnel)}` : '';
+        const res = await fetch(`/api/actions/hunt${ifaceParam}`, { method: 'POST' });
         if (res.ok) {
-          this.showToast('🔄 5-Tuple port hunt initiated');
+          this.showToast(`🔄 5-Tuple port hunt initiated${this.selectedTunnel ? ` for ${this.selectedTunnel}` : ''}`);
           this.pollStatus();
         } else {
           this.showToast('Failed to trigger port hunt', true);
@@ -241,8 +259,9 @@ class AutoWGApp {
   }
 
   updateLiveHandshakeAge() {
-    if (!this.currentData || !this.lastHandshake) return;
-    const baseAge = this.currentData.handshake_age_seconds;
+    const data = this.getSelectedTunnelData();
+    if (!data || !this.lastHandshake) return;
+    const baseAge = data.handshake_age_seconds;
     if (baseAge !== undefined && baseAge > 0) {
       const elapsed = Math.round((Date.now() - this.lastPollTimestamp) / 1000);
       const totalAge = Math.round(baseAge + elapsed);
@@ -251,10 +270,12 @@ class AutoWGApp {
       } else {
         this.lastHandshake.textContent = `${Math.floor(totalAge / 60)}m ${totalAge % 60}s ago`;
       }
+    } else {
+      this.lastHandshake.textContent = 'Never / Waiting';
     }
-    this.renderTimestamps(this.currentData);
-    if (this.currentData && this.currentData.events) {
-      this.renderEvents(this.currentData.events);
+    this.renderTimestamps(data);
+    if (data && data.events) {
+      this.renderEvents(data.events);
     }
   }
 
@@ -288,7 +309,14 @@ class AutoWGApp {
     }
   }
 
-  renderStatus(data) {
+  renderStatus(fullData) {
+    if (!fullData) return;
+
+    // Render multi-tunnel switcher if tunnels map is present
+    this.renderTunnelSwitcher(fullData);
+
+    const data = this.getSelectedTunnelData() || fullData;
+
     // 1. Status Pill & Reason
     const state = data.state || 'UNKNOWN';
     this.stateBadge.textContent = state;
@@ -315,9 +343,6 @@ class AutoWGApp {
 
     // 3. Center Bridge
     this.updateLiveHandshakeAge();
-    if (data.handshake_age_seconds === undefined || data.handshake_age_seconds <= 0) {
-      this.lastHandshake.textContent = 'Never / Waiting';
-    }
 
     if (this.flowDirectionBadge) {
       const dir = data.last_direction || 'Local ⇄ Remote';
@@ -348,11 +373,11 @@ class AutoWGApp {
 
     // 4. Remote Node
     this.staggerRole.textContent = data.is_primary ? 'Primary Peer' : 'Secondary Peer';
-    this.targetIP.textContent = data.target_ip || 'Auto-discovering...';
+    this.targetIP.textContent = data.target_ip || (data.endpoint ? data.endpoint : 'Auto-discovering...');
     this.targetIP.title = data.target_ip || '';
     this.remotePort.textContent = data.remote_port > 0 ? `:${data.remote_port}` : '--';
     this.remotePortRange.textContent = data.remote_port_range || '--';
-    this.peerPubKey.textContent = data.peer_public_key || 'Auto-discovering...';
+    this.peerPubKey.textContent = data.peer_public_key || '--';
     this.peerPubKey.title = data.peer_public_key || '';
 
     // 5. Telemetry Cards
@@ -406,6 +431,97 @@ class AutoWGApp {
 
     // Connection Events History
     this.renderEvents(data.events);
+  }
+
+  renderTunnelSwitcher(fullData) {
+    if (!this.tunnelSwitcherCard || !this.tunnelTabs) return;
+
+    const tunnels = fullData.tunnels;
+    const order = fullData.tunnel_order || (tunnels ? Object.keys(tunnels) : []);
+
+    if (!order || order.length <= 1) {
+      if (!fullData.active_tunnel) {
+        this.tunnelSwitcherCard.style.display = 'none';
+        return;
+      }
+    }
+
+    this.tunnelSwitcherCard.style.display = 'block';
+
+    if (this.switcherModeTag) {
+      this.switcherModeTag.textContent = `MODE: ${(fullData.mode || 'GATEWAY').toUpperCase()}`;
+    }
+
+    if (this.switcherActiveRouteBadge) {
+      if (fullData.active_tunnel) {
+        this.switcherActiveRouteBadge.style.display = 'inline-block';
+        this.switcherActiveRouteBadge.textContent = `★ Active Route: ${fullData.active_tunnel}`;
+      } else {
+        this.switcherActiveRouteBadge.style.display = 'none';
+      }
+    }
+
+    // Default selectedTunnel if unset
+    if (!this.selectedTunnel || (tunnels && !tunnels[this.selectedTunnel])) {
+      this.selectedTunnel = fullData.active_tunnel || (order.length > 0 ? order[0] : null);
+    }
+
+    // Header actions: Switch route button if in client mode and looking at non-active tunnel
+    if (this.tunnelHeaderActions) {
+      this.tunnelHeaderActions.innerHTML = '';
+      if (fullData.mode === 'client' && fullData.routing && fullData.routing.enabled) {
+        if (this.selectedTunnel && this.selectedTunnel !== fullData.active_tunnel) {
+          const btnSwitch = document.createElement('button');
+          btnSwitch.className = 'btn btn-sm btn-accent';
+          btnSwitch.textContent = `🔀 Set ${this.selectedTunnel} as Active Route`;
+          btnSwitch.addEventListener('click', async () => {
+            btnSwitch.disabled = true;
+            try {
+              const res = await fetch(`/api/actions/switch?interface=${encodeURIComponent(this.selectedTunnel)}`, { method: 'POST' });
+              if (res.ok) {
+                this.showToast(`✓ Active route switched to ${this.selectedTunnel}`);
+                this.pollStatus();
+              } else {
+                this.showToast('Failed to switch route', true);
+              }
+            } catch (err) {
+              this.showToast('Network error: ' + err.message, true);
+            } finally {
+              btnSwitch.disabled = false;
+            }
+          });
+          this.tunnelHeaderActions.appendChild(btnSwitch);
+        }
+      }
+    }
+
+    // Render tunnel tabs
+    this.tunnelTabs.innerHTML = '';
+    for (const iface of order) {
+      const t = (tunnels && tunnels[iface]) || {};
+      const isSelected = (iface === this.selectedTunnel);
+      const isRouteActive = (iface === fullData.active_tunnel);
+
+      let dotClass = 'dot-unknown';
+      if (t.state === 'CONNECTED') dotClass = 'dot-connected';
+      else if (t.state === 'STALLED') dotClass = 'dot-stalled';
+      else if (t.state === 'HUNTING') dotClass = 'dot-hunting';
+
+      const btn = document.createElement('button');
+      btn.className = `tunnel-tab-btn ${isSelected ? 'active' : ''}`;
+      btn.innerHTML = `
+        <span class="tab-dot ${dotClass}"></span>
+        <span class="tab-name">${t.name ? `${t.name} (${iface})` : iface}</span>
+        ${isRouteActive ? '<span class="tab-badge-route">Active Route</span>' : ''}
+      `;
+
+      btn.addEventListener('click', () => {
+        this.selectedTunnel = iface;
+        this.renderStatus(this.currentData);
+      });
+
+      this.tunnelTabs.appendChild(btn);
+    }
   }
 
   renderEvents(events) {

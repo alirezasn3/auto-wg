@@ -31,6 +31,18 @@
 
     <!-- TAB 1: DASHBOARD -->
     <main id="tab-dashboard" class="tab-content active">
+      <!-- MULTI-TUNNEL SWITCHER (Visible when 2+ tunnels or in routing mode) -->
+      <section class="card tunnel-switcher-card" id="tunnelSwitcherCard" style="display: none;">
+        <div class="tunnel-switcher-header">
+          <div class="tunnel-header-left">
+            <span class="section-tag" id="switcherModeTag">TUNNELS</span>
+            <span class="switcher-active-route" id="switcherActiveRouteBadge" style="display: none;"></span>
+          </div>
+          <div class="tunnel-header-actions" id="tunnelHeaderActions"></div>
+        </div>
+        <div class="tunnel-tabs" id="tunnelTabs"></div>
+      </section>
+
       <!-- HERO: 5-TUPLE CONNECTION FLOW -->
       <section class="card flow-hero-card">
         <div class="flow-hero-header">

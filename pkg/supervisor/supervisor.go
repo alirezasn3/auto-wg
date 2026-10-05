@@ -14,11 +14,13 @@ import (
 )
 
 type SupervisorStatus struct {
-	Mode         string                        `json:"mode"`
-	ActiveTunnel string                        `json:"active_tunnel,omitempty"`
-	Routing      config.RoutingConfig          `json:"routing"`
+	hunter.StatusReport `json:",inline"`
+
+	Mode         string                         `json:"mode"`
+	ActiveTunnel string                         `json:"active_tunnel,omitempty"`
+	Routing      config.RoutingConfig           `json:"routing"`
 	Tunnels      map[string]hunter.StatusReport `json:"tunnels"`
-	TunnelOrder  []string                      `json:"tunnel_order"`
+	TunnelOrder  []string                       `json:"tunnel_order"`
 }
 
 type Supervisor struct {
@@ -169,7 +171,20 @@ func (s *Supervisor) GetStatus() SupervisorStatus {
 	orderCopy := make([]string, len(s.tunnelOrder))
 	copy(orderCopy, s.tunnelOrder)
 
+	var primaryReport hunter.StatusReport
+	if active != "" {
+		if r, ok := reports[active]; ok {
+			primaryReport = r
+		}
+	}
+	if primaryReport.Interface == "" && len(orderCopy) > 0 {
+		if r, ok := reports[orderCopy[0]]; ok {
+			primaryReport = r
+		}
+	}
+
 	return SupervisorStatus{
+		StatusReport: primaryReport,
 		Mode:         s.cfg.Mode,
 		ActiveTunnel: active,
 		Routing:      s.cfg.Routing,

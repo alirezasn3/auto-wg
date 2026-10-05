@@ -32,6 +32,8 @@ type RoutingConfig struct {
 type TunnelConfig struct {
 	Interface        string           `yaml:"interface" json:"interface"` // Interface name, e.g. "wg0", "wgBridge"
 	Name             string           `yaml:"name" json:"name"`           // Descriptive name (e.g. "Client-A", "Frankfurt-Main")
+	TargetIP         string           `yaml:"target_ip,omitempty" json:"target_ip,omitempty"` // Optional remote endpoint IP / fallback
+	PeerPublicKey    string           `yaml:"peer_public_key,omitempty" json:"peer_public_key,omitempty"` // Optional peer public key
 	PortRange        string           `yaml:"port_range" json:"port_range"` // Local forwarded port range
 	RemotePortRange  string           `yaml:"remote_port_range" json:"remote_port_range"` // Remote peer's port range
 	CheckInterval    time.Duration    `yaml:"check_interval" json:"check_interval"`       // Check frequency (default: 3s)

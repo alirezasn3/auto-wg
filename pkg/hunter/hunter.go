@@ -167,6 +167,7 @@ func (h *Hunter) setState(newState string) {
 		return
 	}
 	h.state = newState
+	h.log.Info("HUNTER", "[%s] State changed: %s -> %s", h.cfg.Interface, oldState, newState)
 	if h.onStateChange != nil {
 		go h.onStateChange(h, oldState, newState)
 	}
@@ -387,10 +388,19 @@ func (h *Hunter) tick(ctx context.Context) {
 	}
 
 	h.mu.Lock()
-	h.localPubKey = dev.PublicKey
-	h.peerPubKey = dev.PeerPublicKey
+	if dev.PublicKey != "" {
+		h.localPubKey = dev.PublicKey
+	}
+	if dev.PeerPublicKey != "" {
+		h.peerPubKey = dev.PeerPublicKey
+	} else if h.peerPubKey == "" && h.cfg.PeerPublicKey != "" {
+		h.peerPubKey = h.cfg.PeerPublicKey
+	}
+
 	if dev.PeerEndpointIP != "" {
 		h.targetIP = strings.Trim(dev.PeerEndpointIP, "[]")
+	} else if h.targetIP == "" && h.cfg.TargetIP != "" {
+		h.targetIP = strings.Trim(h.cfg.TargetIP, "[]")
 	}
 	h.localPort = dev.ListenPort
 	h.remotePort = dev.PeerPort
@@ -449,6 +459,8 @@ func (h *Hunter) tick(ctx context.Context) {
 			dir := "Local ⇄ Remote"
 			h.lastDirection = dir
 			remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
+			h.log.Info("HUNTER", "[%s] Tunnel healthy & active: :%d -> %s (Handshake: %v ago)",
+				iface, h.localPort, remoteEndpointStr, dev.HandshakeAge.Round(time.Millisecond))
 			h.addEvent(StateConnected, dir, "Initial Handshake", fmt.Sprintf("Link active: :%d -> %s", h.localPort, remoteEndpointStr), 0)
 		}
 		h.setState(StateConnected)

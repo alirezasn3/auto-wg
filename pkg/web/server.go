@@ -279,6 +279,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	st := s.sup.GetStatus()
+	if iface := r.URL.Query().Get("interface"); iface != "" {
+		if rep, ok := st.Tunnels[iface]; ok {
+			st.StatusReport = rep
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(st)
 }
