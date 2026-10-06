@@ -220,3 +220,42 @@ func TestHunterMultiDestinationRotation(t *testing.T) {
 	}
 }
 
+func TestServerModeBidirectionalHuntingWithoutNAT(t *testing.T) {
+	log := logger.New(io.Discard, logger.LevelDebug, 100)
+	wgCtrl, _ := wg.NewController(log)
+	iptMgr := iptables.NewManager(log)
+
+	// Server config with client's public IPv4 and IPv6
+	serverTunnelCfg := config.TunnelConfig{
+		Interface:       "wg0",
+		Name:            "Client-Alpha",
+		TargetIPs:       []string{"203.0.113.10", "2001:db8::10"},
+		PortRange:       "20000-24999",
+		RemotePortRange: "20000-24999",
+		HistoryFile:     "off",
+	}
+
+	h := New(serverTunnelCfg, wgCtrl, iptMgr, log, nil)
+
+	// Verify server knows client's candidate target IPs initially
+	st := h.GetStatus()
+	if st.TargetIP != "203.0.113.10" {
+		t.Errorf("expected initial TargetIP 203.0.113.10, got %s", st.TargetIP)
+	}
+
+	// Server initiates hunt when link is dead
+	h.executeHunt("no_handshake_ever")
+	st1 := h.GetStatus()
+	if st1.TargetIP != "2001:db8::10" {
+		t.Errorf("expected TargetIP after 1st hunt to be 2001:db8::10, got %s", st1.TargetIP)
+	}
+
+	// Server rotates back to IPv4 on next hunt
+	h.executeHunt("handshake_expired")
+	st2 := h.GetStatus()
+	if st2.TargetIP != "203.0.113.10" {
+		t.Errorf("expected TargetIP after 2nd hunt to be 203.0.113.10, got %s", st2.TargetIP)
+	}
+}
+
+

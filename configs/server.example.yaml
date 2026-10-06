@@ -16,6 +16,14 @@ pre_down:
 tunnels:
   - interface: "wg0"
     name: "Client-Alpha"
+    # Destination IPs or domain names:
+    # If machines are NOT behind NAT (both server and client have public IPs or IPv4/IPv6):
+    # Set the client's public candidate IPs or domain name here.
+    # Auto-WG will hunt bidirectionally from both sides and alternate between IPv4 and IPv6!
+    # (If the client is behind NAT or dynamic IP, omit target_ips and the server will roam automatically).
+    target_ips:
+      - "203.0.113.10"      # Client Alpha public IPv4
+      - "2001:db8::10"       # Client Alpha public IPv6 (bracketed automatically: [2001:db8::10]:port)
     port_range: "20000-24999"
     remote_port_range: "20000-24999"
     handshake_timeout: 60s
