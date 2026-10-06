@@ -49,6 +49,7 @@ type StatusReport struct {
 	LocalPublicKey     string            `json:"local_public_key"`
 	PeerPublicKey      string            `json:"peer_public_key"`
 	TargetIP           string            `json:"target_ip"`
+	TargetIPs          []string          `json:"target_ips,omitempty"`
 	InTunnelPingTarget string            `json:"in_tunnel_ping_target"`
 	LocalPort          int               `json:"local_port"`
 	RemotePort         int               `json:"remote_port"`
@@ -101,6 +102,9 @@ type Hunter struct {
 	localPubKey          string
 	peerPubKey           string
 	targetIP             string
+	targetIPs            []string
+	targetIPIndex        int
+	configuredTargets    []string
 	pingTarget           string
 	localPort            int
 	remotePort           int
@@ -145,17 +149,42 @@ func New(tunnelCfg config.TunnelConfig, wgCtrl *wg.Controller, iptMgr *iptables.
 		histFile = ""
 	}
 
+	var rawTargets []string
+	for _, ip := range tunnelCfg.TargetIPs {
+		ip = strings.TrimSpace(ip)
+		if ip != "" {
+			rawTargets = append(rawTargets, ip)
+		}
+	}
+	if tunnelCfg.TargetIP != "" {
+		ip := strings.TrimSpace(tunnelCfg.TargetIP)
+		if ip != "" {
+			rawTargets = append(rawTargets, ip)
+		}
+	}
+	resolved := config.ResolveTargetIPs(rawTargets)
+	var initialTarget string
+	if len(resolved) > 0 {
+		initialTarget = resolved[0]
+	} else if tunnelCfg.TargetIP != "" {
+		initialTarget = strings.Trim(tunnelCfg.TargetIP, "[]")
+	}
+
 	h := &Hunter{
-		cfg:           tunnelCfg,
-		historyFile:   histFile,
-		wgCtrl:        wgCtrl,
-		iptMgr:        iptMgr,
-		log:           log,
-		onStateChange: onStateChange,
-		state:         StateUnknown,
-		lastDirection: "Local ⇄ Remote",
-		events:        make([]ConnectionEvent, 0, 50),
-		manualTrigger: make(chan string, 10),
+		cfg:               tunnelCfg,
+		historyFile:       histFile,
+		wgCtrl:            wgCtrl,
+		iptMgr:            iptMgr,
+		log:               log,
+		onStateChange:     onStateChange,
+		state:             StateUnknown,
+		targetIP:          initialTarget,
+		targetIPs:         resolved,
+		targetIPIndex:     0,
+		configuredTargets: rawTargets,
+		lastDirection:     "Local ⇄ Remote",
+		events:            make([]ConnectionEvent, 0, 50),
+		manualTrigger:     make(chan string, 10),
 	}
 	h.loadHistory()
 	return h
@@ -402,7 +431,23 @@ func (h *Hunter) tick(ctx context.Context) {
 	}
 
 	if dev.PeerEndpointIP != "" {
-		h.targetIP = strings.Trim(dev.PeerEndpointIP, "[]")
+		cleanDevIP := strings.Trim(dev.PeerEndpointIP, "[]")
+		h.targetIP = cleanDevIP
+		// Find cleanDevIP in targetIPs and update targetIPIndex
+		found := false
+		for idx, tip := range h.targetIPs {
+			if tip == cleanDevIP {
+				found = true
+				h.targetIPIndex = idx
+				break
+			}
+		}
+		if !found && cleanDevIP != "" {
+			h.targetIPs = append(h.targetIPs, cleanDevIP)
+			h.targetIPIndex = len(h.targetIPs) - 1
+		}
+	} else if h.targetIP == "" && len(h.targetIPs) > 0 {
+		h.targetIP = h.targetIPs[0]
 	} else if h.targetIP == "" && h.cfg.TargetIP != "" {
 		h.targetIP = strings.Trim(h.cfg.TargetIP, "[]")
 	}
@@ -601,13 +646,26 @@ func (h *Hunter) executeHunt(reason string) {
 	iface := h.cfg.Interface
 	localRange := h.cfg.PortRange
 	remoteRange := h.cfg.RemotePortRange
-	targetIP := h.targetIP
 	peerKey := h.peerPubKey
 	h.totalHunts++
 	h.currentAttempt++
 	h.lastHuntTime = time.Now()
 	h.lastHuntReason = reason
 	attempt := h.currentAttempt
+
+	// Re-resolve candidate targets if empty
+	if len(h.targetIPs) == 0 && len(h.configuredTargets) > 0 {
+		h.targetIPs = config.ResolveTargetIPs(h.configuredTargets)
+	}
+
+	// Rotate candidate target IP if multiple candidate destinations are configured
+	if len(h.targetIPs) > 1 {
+		h.targetIPIndex = (h.targetIPIndex + 1) % len(h.targetIPs)
+		h.targetIP = h.targetIPs[h.targetIPIndex]
+	} else if len(h.targetIPs) == 1 {
+		h.targetIP = h.targetIPs[0]
+	}
+	targetIP := h.targetIP
 	_ = h.saveHistoryLocked()
 	h.mu.Unlock()
 
@@ -671,18 +729,32 @@ func (h *Hunter) executeHunt(reason string) {
 }
 
 func (h *Hunter) sendProbePacket(localPort int, targetIP string, remotePort int) {
-	localAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", localPort))
-	if err != nil {
-		return
+	cleanIP := strings.Trim(targetIP, "[]")
+	parsedIP := net.ParseIP(cleanIP)
+	isIPv6 := parsedIP != nil && parsedIP.To4() == nil
+
+	remoteEndpoint := net.JoinHostPort(cleanIP, strconv.Itoa(remotePort))
+	network := "udp4"
+	localBind := fmt.Sprintf("0.0.0.0:%d", localPort)
+	if isIPv6 {
+		network = "udp6"
+		localBind = fmt.Sprintf("[::]:%d", localPort)
 	}
-	remoteAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(targetIP, strconv.Itoa(remotePort)))
+
+	remoteAddr, err := net.ResolveUDPAddr(network, remoteEndpoint)
 	if err != nil {
 		return
 	}
 
-	conn, err := net.DialUDP("udp", localAddr, remoteAddr)
+	localAddr, _ := net.ResolveUDPAddr(network, localBind)
+
+	conn, err := net.DialUDP(network, localAddr, remoteAddr)
 	if err != nil {
-		return
+		// Fallback to dialing without binding local address if local port is unavailable or family mismatch
+		conn, err = net.DialUDP(network, nil, remoteAddr)
+		if err != nil {
+			return
+		}
 	}
 	defer conn.Close()
 
@@ -744,6 +816,9 @@ func (h *Hunter) GetStatus() StatusReport {
 	eventsCopy := make([]ConnectionEvent, len(h.events))
 	copy(eventsCopy, h.events)
 
+	targetIPsCopy := make([]string, len(h.targetIPs))
+	copy(targetIPsCopy, h.targetIPs)
+
 	lastDir := h.lastDirection
 	if lastDir == "" {
 		lastDir = "Local ⇄ Remote"
@@ -756,6 +831,7 @@ func (h *Hunter) GetStatus() StatusReport {
 		LocalPublicKey:     h.localPubKey,
 		PeerPublicKey:      h.peerPubKey,
 		TargetIP:           h.targetIP,
+		TargetIPs:          targetIPsCopy,
 		InTunnelPingTarget: h.pingTarget,
 		LocalPort:          h.localPort,
 		RemotePort:         h.remotePort,

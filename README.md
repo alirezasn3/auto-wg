@@ -20,6 +20,7 @@ Auto-WG natively supports two primary deployment topologies:
 * **Kernel Port Forwarding (`go-iptables`)**: Automatically forwards disjoint UDP port ranges (e.g., `20000–24999`, `25000–29999`) directly to each WireGuard interface's listening port using `iptables -t nat -A PREROUTING -j REDIRECT`. Linux `conntrack` handles reverse translation.
 * **Automatic Peer Discovery**: Auto-WG queries each WireGuard interface and automatically extracts the single peer's public key, current endpoint, and handshake statistics directly from the kernel.
 * **Deterministic Anti-Collision Staggering**: Uses public key lexicographical comparison (`localPubKey < peerPubKey`) to coordinate turn-taking windows (e.g. 8s cycle) so peers do not collide or flap while hunting.
+* **Multi-Destination Dual-Stack Hunting (`target_ips`)**: Tunnels can specify multiple candidate destination endpoints (IPv4 & IPv6, or domain hostnames). If DPI blocks or throttles one address family, Auto-WG automatically round-robins between IPv4 and IPv6 during port hunting to punch through hostile firewalls.
 * **Integrated Web Dashboard & Public Status Page**: Modern, mobile-responsive web UI with multi-tunnel telemetry, active route indication, manual hunt/rebind triggers, live SSE logs, and an isolated bilingual (Persian & English) public status page.
 
 ---
@@ -232,6 +233,8 @@ sudo ./autowg --uninstall
 | :--- | :--- | :--- | :--- |
 | `interface` | string | **Required** | WireGuard interface name (`wg0`, `wgBridge0`, etc.) |
 | `name` | string | `""` | Human-friendly alias displayed on the web dashboard |
+| `target_ip` | string | `""` | Single remote destination IP or fallback |
+| `target_ips` | list of string | `[]` | Candidate destination IPs / domain names (IPv4 & IPv6) rotated during hunting |
 | `port_range` | string | `20000-30000` | Local port range forwarded to WireGuard listen port |
 | `remote_port_range` | string | `20000-30000` | Remote peer's forwarded port range |
 | `iptables` | bool | `true` | Automatically manage `iptables -t nat -A PREROUTING` redirect rule |

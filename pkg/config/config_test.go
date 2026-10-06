@@ -139,3 +139,63 @@ func TestValidateDuplicateInterface(t *testing.T) {
 		t.Fatalf("expected validation error for duplicate interface, got nil")
 	}
 }
+
+func TestResolveTargetIPs(t *testing.T) {
+	entries := []string{
+		" 198.51.100.1 ",
+		"[2001:db8::1]",
+		"198.51.100.1",        // duplicate
+		"2001:0db8::0001",     // duplicate canonical IPv6
+		"",                    // empty
+		"   ",                 // whitespace
+		"localhost",           // hostname
+	}
+
+	resolved := ResolveTargetIPs(entries)
+	if len(resolved) < 2 {
+		t.Fatalf("expected at least 2 resolved IPs, got %d: %v", len(resolved), resolved)
+	}
+
+	if resolved[0] != "198.51.100.1" {
+		t.Errorf("expected first IP 198.51.100.1, got %s", resolved[0])
+	}
+	if resolved[1] != "2001:db8::1" {
+		t.Errorf("expected second IP 2001:db8::1, got %s", resolved[1])
+	}
+
+	// Verify deduplication
+	seen := make(map[string]bool)
+	for _, ip := range resolved {
+		if seen[ip] {
+			t.Errorf("duplicate IP found in resolved output: %s", ip)
+		}
+		seen[ip] = true
+	}
+}
+
+func TestTargetIPsConfigDefaults(t *testing.T) {
+	// Case 1: Only TargetIP provided
+	cfg1 := &Config{
+		Mode: "client",
+		Tunnels: []TunnelConfig{
+			{Interface: "wg0", TargetIP: "198.51.100.1"},
+		},
+	}
+	SetDefaults(cfg1)
+	if len(cfg1.Tunnels[0].TargetIPs) != 1 || cfg1.Tunnels[0].TargetIPs[0] != "198.51.100.1" {
+		t.Errorf("expected TargetIPs to contain TargetIP, got %v", cfg1.Tunnels[0].TargetIPs)
+	}
+
+	// Case 2: Only TargetIPs provided
+	cfg2 := &Config{
+		Mode: "client",
+		Tunnels: []TunnelConfig{
+			{Interface: "wg0", TargetIPs: []string{"2001:db8::1", "198.51.100.1"}},
+		},
+	}
+	SetDefaults(cfg2)
+	if cfg2.Tunnels[0].TargetIP != "2001:db8::1" {
+		t.Errorf("expected TargetIP to default to first TargetIPs entry, got %s", cfg2.Tunnels[0].TargetIP)
+	}
+}
+

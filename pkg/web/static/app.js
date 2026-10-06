@@ -373,8 +373,14 @@ class AutoWGApp {
 
     // 4. Remote Node
     this.staggerRole.textContent = data.is_primary ? 'Primary Peer' : 'Secondary Peer';
-    this.targetIP.textContent = data.target_ip || (data.endpoint ? data.endpoint : 'Auto-discovering...');
-    this.targetIP.title = data.target_ip || '';
+    let displayTarget = data.target_ip || (data.endpoint ? data.endpoint : 'Auto-discovering...');
+    if (data.target_ips && data.target_ips.length > 1) {
+      this.targetIP.textContent = `${displayTarget} (${data.target_ips.length} IPs)`;
+      this.targetIP.title = `Active Target: ${data.target_ip || '--'}\nCandidate Targets:\n${data.target_ips.join('\n')}`;
+    } else {
+      this.targetIP.textContent = displayTarget;
+      this.targetIP.title = data.target_ip || '';
+    }
     this.remotePort.textContent = data.remote_port > 0 ? `:${data.remote_port}` : '--';
     this.remotePortRange.textContent = data.remote_port_range || '--';
     this.peerPubKey.textContent = data.peer_public_key || '--';

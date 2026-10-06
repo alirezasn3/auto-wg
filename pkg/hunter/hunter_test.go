@@ -168,3 +168,55 @@ func TestHunterHistoryPersistence(t *testing.T) {
 		t.Errorf("expected new event ID %d > previous event ID %d", st2Updated.Events[0].ID, st2Updated.Events[1].ID)
 	}
 }
+
+func TestHunterMultiDestinationRotation(t *testing.T) {
+	log := logger.New(io.Discard, logger.LevelDebug, 100)
+	wgCtrl, _ := wg.NewController(log)
+	iptMgr := iptables.NewManager(log)
+
+	tunnelCfg := config.TunnelConfig{
+		Interface:       "wg0",
+		TargetIPs:       []string{"198.51.100.1", "2001:db8::1"},
+		PortRange:       "20000-21000",
+		RemotePortRange: "20000-21000",
+		HistoryFile:     "off",
+	}
+
+	h := New(tunnelCfg, wgCtrl, iptMgr, log, nil)
+
+	st0 := h.GetStatus()
+	if st0.TargetIP != "198.51.100.1" {
+		t.Errorf("expected initial TargetIP 198.51.100.1, got %s", st0.TargetIP)
+	}
+	if len(st0.TargetIPs) != 2 || st0.TargetIPs[0] != "198.51.100.1" || st0.TargetIPs[1] != "2001:db8::1" {
+		t.Errorf("unexpected TargetIPs in StatusReport: %v", st0.TargetIPs)
+	}
+
+	// 1st Hunt -> Should rotate to IPv6 (2001:db8::1)
+	h.executeHunt("dpi_drop_ipv4")
+	st1 := h.GetStatus()
+	if st1.TargetIP != "2001:db8::1" {
+		t.Errorf("expected TargetIP after 1st hunt to be 2001:db8::1, got %s", st1.TargetIP)
+	}
+	if st1.TotalHunts != 1 {
+		t.Errorf("expected TotalHunts 1, got %d", st1.TotalHunts)
+	}
+
+	// 2nd Hunt -> Should rotate back to IPv4 (198.51.100.1)
+	h.executeHunt("dpi_drop_ipv6")
+	st2 := h.GetStatus()
+	if st2.TargetIP != "198.51.100.1" {
+		t.Errorf("expected TargetIP after 2nd hunt to be 198.51.100.1, got %s", st2.TargetIP)
+	}
+	if st2.TotalHunts != 2 {
+		t.Errorf("expected TotalHunts 2, got %d", st2.TotalHunts)
+	}
+
+	// 3rd Hunt -> Should rotate to IPv6 again (2001:db8::1)
+	h.executeHunt("handshake_expired")
+	st3 := h.GetStatus()
+	if st3.TargetIP != "2001:db8::1" {
+		t.Errorf("expected TargetIP after 3rd hunt to be 2001:db8::1, got %s", st3.TargetIP)
+	}
+}
+

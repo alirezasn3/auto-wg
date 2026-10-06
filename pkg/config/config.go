@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ type TunnelConfig struct {
 	Interface        string           `yaml:"interface" json:"interface"` // Interface name, e.g. "wg0", "wgBridge"
 	Name             string           `yaml:"name" json:"name"`           // Descriptive name (e.g. "Client-A", "Frankfurt-Main")
 	TargetIP         string           `yaml:"target_ip,omitempty" json:"target_ip,omitempty"` // Optional remote endpoint IP / fallback
+	TargetIPs        []string         `yaml:"target_ips,omitempty" json:"target_ips,omitempty"` // Multiple candidate destination IPs / hostnames (IPv4 & IPv6)
 	PeerPublicKey    string           `yaml:"peer_public_key,omitempty" json:"peer_public_key,omitempty"` // Optional peer public key
 	PortRange        string           `yaml:"port_range" json:"port_range"` // Local forwarded port range
 	RemotePortRange  string           `yaml:"remote_port_range" json:"remote_port_range"` // Remote peer's port range
@@ -158,6 +160,12 @@ func SetDefaults(cfg *Config) {
 		if t.Name == "" {
 			t.Name = t.Interface
 		}
+		if len(t.TargetIPs) == 0 && t.TargetIP != "" {
+			t.TargetIPs = []string{t.TargetIP}
+		}
+		if t.TargetIP == "" && len(t.TargetIPs) > 0 {
+			t.TargetIP = t.TargetIPs[0]
+		}
 	}
 
 	if cfg.Web.ListenAddr == "" {
@@ -263,4 +271,58 @@ func PickRandomPort(rangeSpec string) (int, error) {
 	}
 
 	return start + int(n.Int64()), nil
+}
+
+// ResolveTargetIPs resolves a list of target IPs and/or hostnames into deduplicated,
+// canonical IP address strings (both IPv4 and IPv6).
+func ResolveTargetIPs(entries []string) []string {
+	var results []string
+	seen := make(map[string]bool)
+
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		// Strip square brackets if formatted as [2001:db8::1]
+		clean := strings.TrimPrefix(strings.TrimSuffix(entry, "]"), "[")
+		if ip := net.ParseIP(clean); ip != nil {
+			var canon string
+			if ip4 := ip.To4(); ip4 != nil {
+				canon = ip4.String()
+			} else {
+				canon = ip.String()
+			}
+			if !seen[canon] {
+				seen[canon] = true
+				results = append(results, canon)
+			}
+			continue
+		}
+
+		// Not an IP address, attempt DNS lookup for both A (IPv4) and AAAA (IPv6) records
+		ips, err := net.LookupIP(clean)
+		if err == nil && len(ips) > 0 {
+			for _, ip := range ips {
+				var canon string
+				if ip4 := ip.To4(); ip4 != nil {
+					canon = ip4.String()
+				} else {
+					canon = ip.String()
+				}
+				if !seen[canon] {
+					seen[canon] = true
+					results = append(results, canon)
+				}
+			}
+		} else {
+			// If DNS resolution fails, preserve the original entry so caller can retry or use as fallback
+			if !seen[clean] {
+				seen[clean] = true
+				results = append(results, clean)
+			}
+		}
+	}
+
+	return results
 }

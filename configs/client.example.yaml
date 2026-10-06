@@ -34,6 +34,12 @@ routing:
 tunnels:
   - interface: "wgBridge0"
     name: "Upstream-Main"
+    # Destination IPs or domain names:
+    # If your upstream server supports both IPv4 and IPv6, or multiple endpoints, Auto-WG will
+    # round-robin between them during hunting when DPI drops or censors one protocol!
+    target_ips:
+      - "198.51.100.1"      # IPv4 upstream destination
+      - "2001:db8::1"       # IPv6 upstream destination (bracketed automatically: [2001:db8::1]:port)
     port_range: "20000-24999"
     remote_port_range: "20000-24999"
     handshake_timeout: 60s
@@ -49,6 +55,7 @@ tunnels:
 
   - interface: "wgBridge1"
     name: "Upstream-Backup"
+    target_ip: "198.51.100.2" # Single IP fallback format also supported
     port_range: "25000-29999"
     remote_port_range: "25000-29999"
     handshake_timeout: 60s
