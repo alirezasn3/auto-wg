@@ -199,3 +199,21 @@ func TestTargetIPsConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestPassiveTunnelConfigDefaults(t *testing.T) {
+	cfg := &Config{
+		Mode: "server",
+		Tunnels: []TunnelConfig{
+			{Interface: "wg-mikrotik", Passive: true},
+			{Interface: "wg0"},
+		},
+	}
+	SetDefaults(cfg)
+	if cfg.Tunnels[0].Hunting == nil || *cfg.Tunnels[0].Hunting != false {
+		t.Errorf("expected tunnel 0 hunting to be false, got %v", cfg.Tunnels[0].Hunting)
+	}
+	if cfg.Tunnels[1].Hunting == nil || *cfg.Tunnels[1].Hunting != true {
+		t.Errorf("expected tunnel 1 hunting to be true, got %v", cfg.Tunnels[1].Hunting)
+	}
+}
+
+

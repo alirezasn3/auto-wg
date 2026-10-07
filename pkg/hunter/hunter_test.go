@@ -258,4 +258,38 @@ func TestServerModeBidirectionalHuntingWithoutNAT(t *testing.T) {
 	}
 }
 
+func TestPassiveTunnelNoHunting(t *testing.T) {
+	log := logger.New(io.Discard, logger.LevelDebug, 100)
+	wgCtrl, _ := wg.NewController(log)
+	iptMgr := iptables.NewManager(log)
+
+	tunnelCfg := config.TunnelConfig{
+		Interface:   "wg-mikrotik",
+		Passive:     true,
+		HistoryFile: "off",
+	}
+
+	h := New(tunnelCfg, wgCtrl, iptMgr, log, nil)
+	if h.huntingEnabled {
+		t.Fatalf("expected huntingEnabled to be false for passive tunnel")
+	}
+
+	st := h.GetStatus()
+	if st.Hunting {
+		t.Errorf("expected Hunting to be false in StatusReport")
+	}
+
+	// Trigger hunt should be rejected
+	h.TriggerHunt("manual_test")
+	if h.totalHunts != 0 {
+		t.Errorf("expected 0 hunts on passive tunnel, got %d", h.totalHunts)
+	}
+
+	// Trigger rebind should return error
+	if err := h.TriggerRebind(); err == nil {
+		t.Errorf("expected error from TriggerRebind on passive tunnel, got nil")
+	}
+}
+
+
 

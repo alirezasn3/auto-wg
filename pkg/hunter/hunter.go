@@ -71,6 +71,7 @@ type StatusReport struct {
 	IptablesActive     bool              `json:"iptables_active"`
 	LocalPortRange     string            `json:"local_port_range"`
 	RemotePortRange    string            `json:"remote_port_range"`
+	Hunting            bool              `json:"hunting"`
 	IsPrimary          bool              `json:"is_primary"`
 }
 
@@ -99,6 +100,7 @@ type Hunter struct {
 
 	// Live state
 	state                string
+	huntingEnabled       bool
 	localPubKey          string
 	peerPubKey           string
 	targetIP             string
@@ -170,6 +172,13 @@ func New(tunnelCfg config.TunnelConfig, wgCtrl *wg.Controller, iptMgr *iptables.
 		initialTarget = strings.Trim(tunnelCfg.TargetIP, "[]")
 	}
 
+	huntingEnabled := true
+	if tunnelCfg.Hunting != nil {
+		huntingEnabled = *tunnelCfg.Hunting
+	} else if tunnelCfg.Passive {
+		huntingEnabled = false
+	}
+
 	h := &Hunter{
 		cfg:               tunnelCfg,
 		historyFile:       histFile,
@@ -178,6 +187,7 @@ func New(tunnelCfg config.TunnelConfig, wgCtrl *wg.Controller, iptMgr *iptables.
 		log:               log,
 		onStateChange:     onStateChange,
 		state:             StateUnknown,
+		huntingEnabled:    huntingEnabled,
 		targetIP:          initialTarget,
 		targetIPs:         resolved,
 		targetIPIndex:     0,
@@ -595,6 +605,14 @@ func (h *Hunter) tick(ctx context.Context) {
 		}
 		h.addEvent(StateDisconnected, h.lastDirection, "", stallReason, uptimeSec)
 	}
+
+	if !h.huntingEnabled {
+		h.setState(StateDisconnected)
+		h.lastHuntReason = "passive_mode_no_hunt"
+		h.mu.Unlock()
+		return
+	}
+
 	h.setState(StateHunting)
 	attempt := h.currentAttempt
 	h.mu.Unlock()
@@ -764,6 +782,10 @@ func (h *Hunter) sendProbePacket(localPort int, targetIP string, remotePort int)
 
 // TriggerHunt initiates an immediate hunt cycle out-of-band.
 func (h *Hunter) TriggerHunt(reason string) {
+	if !h.huntingEnabled {
+		h.log.Warn("HUNTER", "[%s] Cannot trigger hunt: tunnel is in passive/monitoring mode (hunting disabled)", h.cfg.Interface)
+		return
+	}
 	select {
 	case h.manualTrigger <- reason:
 	default:
@@ -772,6 +794,10 @@ func (h *Hunter) TriggerHunt(reason string) {
 
 // TriggerRebind rotates the local listen port and updates iptables forwarding.
 func (h *Hunter) TriggerRebind() error {
+	if !h.huntingEnabled {
+		return fmt.Errorf("rebind is disabled on passive tunnel %s", h.cfg.Interface)
+	}
+
 	h.mu.Lock()
 	iface := h.cfg.Interface
 	localRange := h.cfg.PortRange
@@ -853,6 +879,7 @@ func (h *Hunter) GetStatus() StatusReport {
 		IptablesActive:     h.iptablesActive,
 		LocalPortRange:     h.cfg.PortRange,
 		RemotePortRange:    h.cfg.RemotePortRange,
+		Hunting:            h.huntingEnabled,
 		IsPrimary:          isPrimary,
 	}
 }

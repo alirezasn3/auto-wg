@@ -237,6 +237,8 @@ sudo ./autowg --uninstall
 | `target_ips` | list of string | `[]` | Candidate destination IPs / domain names (IPv4 & IPv6) rotated during hunting |
 | `port_range` | string | `20000-30000` | Local port range forwarded to WireGuard listen port |
 | `remote_port_range` | string | `20000-30000` | Remote peer's forwarded port range |
+| `hunting` | bool | `true` | Enable autonomous port hunting. Set `false` for passive / MikroTik peers |
+| `passive` | bool | `false` | Alias for `hunting: false` (monitors tunnel and pings without port rotation) |
 | `iptables` | bool | `true` | Automatically manage `iptables -t nat -A PREROUTING` redirect rule |
 | `check_interval` | duration | `3s` | Interval between handshake and reachability polls |
 | `handshake_timeout` | duration | `60s` | Stale handshake threshold triggering reachability checks |

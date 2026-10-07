@@ -38,6 +38,8 @@ type TunnelConfig struct {
 	PeerPublicKey    string           `yaml:"peer_public_key,omitempty" json:"peer_public_key,omitempty"` // Optional peer public key
 	PortRange        string           `yaml:"port_range" json:"port_range"` // Local forwarded port range
 	RemotePortRange  string           `yaml:"remote_port_range" json:"remote_port_range"` // Remote peer's port range
+	Hunting          *bool            `yaml:"hunting,omitempty" json:"hunting,omitempty"` // Enable autonomous port hunting (default: true). Set false for passive/MikroTik peers!
+	Passive          bool             `yaml:"passive,omitempty" json:"passive,omitempty"` // Alias for hunting: false (monitor & ping only, no port rotation)
 	CheckInterval    time.Duration    `yaml:"check_interval" json:"check_interval"`       // Check frequency (default: 3s)
 	HandshakeTimeout time.Duration    `yaml:"handshake_timeout" json:"handshake_timeout"` // Stale handshake threshold (default: 60s)
 	CycleTimeout     time.Duration    `yaml:"cycle_timeout" json:"cycle_timeout"`         // Staggered turn duration (default: 8s)
@@ -159,6 +161,10 @@ func SetDefaults(cfg *Config) {
 		}
 		if t.Name == "" {
 			t.Name = t.Interface
+		}
+		if t.Hunting == nil {
+			defaultHunting := !t.Passive
+			t.Hunting = &defaultHunting
 		}
 		if len(t.TargetIPs) == 0 && t.TargetIP != "" {
 			t.TargetIPs = []string{t.TargetIP}

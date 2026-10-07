@@ -52,6 +52,24 @@ tunnels:
     history_file: "history-wg1.json"
     iptables: true
 
+  # --------------------------------------------------------------------------
+  # Example 3: Passive / MikroTik Tunnel (No Port Hunting)
+  # Standard WireGuard peers/routers (like MikroTik RouterOS) do not run Auto-WG
+  # and use fixed listening ports. Set `passive: true` (or `hunting: false`) so
+  # Auto-WG will monitor uptime, in-tunnel ping, and telemetry on the web
+  # dashboard WITHOUT rotating ports or breaking the MikroTik link!
+  # --------------------------------------------------------------------------
+  - interface: "wg2"
+    name: "Branch-MikroTik"
+    passive: true             # Monitor only: do not hunt or rotate ports
+    iptables: false           # Do not manage iptables port forwarding (uses static WireGuard port)
+    tunnel_ping:
+      enabled: true
+      target_ip: "10.2.0.2"   # In-tunnel IP of MikroTik router
+      interval: 2s
+      failure_threshold: 3
+    history_file: "history-wg2.json"
+
 web:
   enabled: true
   listen_addr: "0.0.0.0:8080"

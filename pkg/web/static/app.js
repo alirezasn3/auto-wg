@@ -387,17 +387,32 @@ class AutoWGApp {
     this.peerPubKey.title = data.peer_public_key || '';
 
     // 5. Telemetry Cards
-    this.huntRecoverySummary.textContent = `${data.successful_hunts || 0} / ${data.total_hunts || 0}`;
-
-    if (data.current_attempt > 0) {
-      this.huntAttemptStatus.textContent = `Hunting (Attempt #${data.current_attempt})`;
-      this.huntAttemptStatus.style.color = 'var(--accent)';
-    } else if (state === 'CONNECTED') {
-      this.huntAttemptStatus.textContent = 'Idle (Connected)';
-      this.huntAttemptStatus.style.color = 'var(--success)';
+    if (data.hunting === false) {
+      this.huntRecoverySummary.textContent = 'Passive';
+      this.huntAttemptStatus.textContent = state === 'CONNECTED' ? 'Passive (Connected)' : 'Passive (Monitoring)';
+      this.huntAttemptStatus.style.color = state === 'CONNECTED' ? 'var(--success)' : 'var(--warning)';
     } else {
-      this.huntAttemptStatus.textContent = state;
-      this.huntAttemptStatus.style.color = 'var(--text-main)';
+      this.huntRecoverySummary.textContent = `${data.successful_hunts || 0} / ${data.total_hunts || 0}`;
+
+      if (data.current_attempt > 0) {
+        this.huntAttemptStatus.textContent = `Hunting (Attempt #${data.current_attempt})`;
+        this.huntAttemptStatus.style.color = 'var(--accent)';
+      } else if (state === 'CONNECTED') {
+        this.huntAttemptStatus.textContent = 'Idle (Connected)';
+        this.huntAttemptStatus.style.color = 'var(--success)';
+      } else {
+        this.huntAttemptStatus.textContent = state;
+        this.huntAttemptStatus.style.color = 'var(--text-main)';
+      }
+    }
+
+    if (this.btnHunt) {
+      this.btnHunt.disabled = data.hunting === false;
+      this.btnHunt.title = data.hunting === false ? 'Port hunting is disabled for this passive tunnel' : 'Trigger immediate port hunt';
+    }
+    if (this.btnRebind) {
+      this.btnRebind.disabled = data.hunting === false;
+      this.btnRebind.title = data.hunting === false ? 'Port rebind is disabled for this passive tunnel' : 'Rotate local listen port';
     }
 
     this.lastHuntReason.textContent = data.last_hunt_reason || 'None';
