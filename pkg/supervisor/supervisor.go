@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -371,6 +372,13 @@ func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if newCfg.Web.Password == "********" || newCfg.Web.Password == "" {
+		newCfg.Web.Password = s.cfg.Web.Password
+	}
+	if strings.Contains(yamlStr, `"********"`) && s.cfg.Web.Password != "" {
+		yamlStr = strings.ReplaceAll(yamlStr, `"********"`, fmt.Sprintf("%q", s.cfg.Web.Password))
+	}
 
 	// 1. Write atomically to startup config file
 	cfgDir := filepath.Dir(s.cfgPath)

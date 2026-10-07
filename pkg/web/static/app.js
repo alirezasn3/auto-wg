@@ -35,6 +35,50 @@ class AutoWGApp {
     this.configIsDirty = false;
     this.configLoaded = false;
 
+    // View Mode Toggle & Form Containers
+    this.btnViewForm = document.getElementById('btnViewForm');
+    this.btnViewYaml = document.getElementById('btnViewYaml');
+    this.configFormContainer = document.getElementById('configFormContainer');
+    this.configRawContainer = document.getElementById('configRawContainer');
+    this.activeConfigView = 'form'; // 'form' or 'yaml'
+
+    // Form Controls: Mode & Routing
+    this.cfgModeClient = document.getElementById('cfgModeClient');
+    this.cfgModeServer = document.getElementById('cfgModeServer');
+    this.routingFieldsSection = document.getElementById('routingFieldsSection');
+    this.cfgRoutingEnabled = document.getElementById('cfgRoutingEnabled');
+    this.cfgRoutingTable = document.getElementById('cfgRoutingTable');
+    this.cfgRoutingMode = document.getElementById('cfgRoutingMode');
+    this.cfgRoutingMetric = document.getElementById('cfgRoutingMetric');
+
+    // Form Controls: Managed Tunnels
+    this.tunnelCardsContainer = document.getElementById('tunnelCardsContainer');
+    this.btnAddTunnel = document.getElementById('btnAddTunnel');
+    this.tunnelFormCount = document.getElementById('tunnelFormCount');
+
+    // Form Controls: Shell Hooks
+    this.headerShellHooks = document.getElementById('headerShellHooks');
+    this.bodyShellHooks = document.getElementById('bodyShellHooks');
+    this.toggleIconShell = document.getElementById('toggleIconShell');
+    this.cfgPostUp = document.getElementById('cfgPostUp');
+    this.cfgPreDown = document.getElementById('cfgPreDown');
+
+    // Form Controls: Web & Status
+    this.headerWebSettings = document.getElementById('headerWebSettings');
+    this.bodyWebSettings = document.getElementById('bodyWebSettings');
+    this.toggleIconWeb = document.getElementById('toggleIconWeb');
+    this.cfgWebEnabled = document.getElementById('cfgWebEnabled');
+    this.cfgWebListen = document.getElementById('cfgWebListen');
+    this.cfgWebAllowedIPs = document.getElementById('cfgWebAllowedIPs');
+    this.cfgWebUser = document.getElementById('cfgWebUser');
+    this.cfgWebPass = document.getElementById('cfgWebPass');
+    this.cfgStatusEnabled = document.getElementById('cfgStatusEnabled');
+    this.cfgStatusListen = document.getElementById('cfgStatusListen');
+    this.cfgStatusTitle = document.getElementById('cfgStatusTitle');
+
+    this.storedWebPassword = '';
+    this.parsedConfig = null;
+
     // Multi-Tunnel Switcher Elements
     this.tunnelSwitcherCard = document.getElementById('tunnelSwitcherCard');
     this.tunnelTabs = document.getElementById('tunnelTabs');
@@ -772,7 +816,13 @@ class AutoWGApp {
   }
 
   initConfigEditor() {
-    if (!this.configYamlEditor) return;
+    if (!this.configYamlEditor && !this.configFormContainer) return;
+
+    // View Mode Toggle (Visual Form vs Raw YAML)
+    if (this.btnViewForm && this.btnViewYaml) {
+      this.btnViewForm.addEventListener('click', () => this.switchConfigView('form'));
+      this.btnViewYaml.addEventListener('click', () => this.switchConfigView('yaml'));
+    }
 
     // Warn before leaving if there are unsaved config edits
     window.addEventListener('beforeunload', (e) => {
@@ -782,39 +832,105 @@ class AutoWGApp {
       }
     });
 
-    // Handle Tab key inside textarea
-    this.configYamlEditor.addEventListener('keydown', (e) => {
-      if (e.key === 'Tab') {
-        e.preventDefault();
-        const start = this.configYamlEditor.selectionStart;
-        const end = this.configYamlEditor.selectionEnd;
-        const val = this.configYamlEditor.value;
+    // Form: Mode selector changes
+    if (this.cfgModeClient && this.cfgModeServer) {
+      this.cfgModeClient.addEventListener('change', () => {
+        if (this.routingFieldsSection) this.routingFieldsSection.style.display = 'flex';
+        this.onConfigFormChange();
+      });
+      this.cfgModeServer.addEventListener('change', () => {
+        if (this.routingFieldsSection) this.routingFieldsSection.style.display = 'none';
+        this.onConfigFormChange();
+      });
+    }
 
-        if (e.shiftKey) {
-          // Shift+Tab: remove up to 2 leading spaces on current line
-          const lineStart = val.lastIndexOf('\n', start - 1) + 1;
-          if (val.substr(lineStart, 2) === '  ') {
-            this.configYamlEditor.value = val.substring(0, lineStart) + val.substring(lineStart + 2);
-            this.configYamlEditor.selectionStart = Math.max(lineStart, start - 2);
-            this.configYamlEditor.selectionEnd = Math.max(lineStart, end - 2);
-          } else if (val.charAt(lineStart) === ' ') {
-            this.configYamlEditor.value = val.substring(0, lineStart) + val.substring(lineStart + 1);
-            this.configYamlEditor.selectionStart = Math.max(lineStart, start - 1);
-            this.configYamlEditor.selectionEnd = Math.max(lineStart, end - 1);
-          }
-        } else {
-          // Tab: insert 2 spaces
-          this.configYamlEditor.value = val.substring(0, start) + '  ' + val.substring(end);
-          this.configYamlEditor.selectionStart = this.configYamlEditor.selectionEnd = start + 2;
-        }
-        this.onConfigEditorChange();
+    // Form: Collapsible Shell Hooks & Web Settings
+    if (this.headerShellHooks && this.bodyShellHooks) {
+      this.headerShellHooks.addEventListener('click', () => {
+        const isCollapsed = this.bodyShellHooks.classList.contains('collapsed');
+        this.bodyShellHooks.classList.toggle('collapsed', !isCollapsed);
+        if (this.toggleIconShell) this.toggleIconShell.textContent = isCollapsed ? '▲' : '▼';
+      });
+    }
+
+    if (this.headerWebSettings && this.bodyWebSettings) {
+      this.headerWebSettings.addEventListener('click', () => {
+        const isCollapsed = this.bodyWebSettings.classList.contains('collapsed');
+        this.bodyWebSettings.classList.toggle('collapsed', !isCollapsed);
+        if (this.toggleIconWeb) this.toggleIconWeb.textContent = isCollapsed ? '▲' : '▼';
+      });
+    }
+
+    // Form: Add Tunnel Button
+    if (this.btnAddTunnel) {
+      this.btnAddTunnel.addEventListener('click', () => {
+        const count = this.tunnelCardsContainer ? this.tunnelCardsContainer.querySelectorAll('.tunnel-form-card').length : 0;
+        const newIface = `wg${count}`;
+        this.addTunnelCard({
+          interface: newIface,
+          name: `Tunnel-${count + 1}`,
+          port_range: '20000-30000',
+          remote_port_range: '20000-30000',
+          hunting: true,
+          iptables: true,
+          target_ips: [],
+          tunnel_ping: { enabled: false, target_ip: '', interval: '2s', failure_threshold: 3 }
+        }, true);
+        this.onConfigFormChange();
+      });
+    }
+
+    // Form: Listen for changes across all top-level form controls
+    const formInputs = [
+      this.cfgRoutingEnabled, this.cfgRoutingTable, this.cfgRoutingMode, this.cfgRoutingMetric,
+      this.cfgPostUp, this.cfgPreDown,
+      this.cfgWebEnabled, this.cfgWebListen, this.cfgWebAllowedIPs, this.cfgWebUser, this.cfgWebPass,
+      this.cfgStatusEnabled, this.cfgStatusListen, this.cfgStatusTitle
+    ];
+    formInputs.forEach(input => {
+      if (input) {
+        input.addEventListener('input', () => this.onConfigFormChange());
+        input.addEventListener('change', () => this.onConfigFormChange());
       }
     });
 
-    // Detect user edits
-    this.configYamlEditor.addEventListener('input', () => {
-      this.onConfigEditorChange();
-    });
+    if (this.tunnelCardsContainer) {
+      this.tunnelCardsContainer.addEventListener('input', () => this.onConfigFormChange());
+      this.tunnelCardsContainer.addEventListener('change', () => this.onConfigFormChange());
+    }
+
+    // Raw YAML: Handle Tab key inside textarea
+    if (this.configYamlEditor) {
+      this.configYamlEditor.addEventListener('keydown', (e) => {
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          const start = this.configYamlEditor.selectionStart;
+          const end = this.configYamlEditor.selectionEnd;
+          const val = this.configYamlEditor.value;
+
+          if (e.shiftKey) {
+            const lineStart = val.lastIndexOf('\n', start - 1) + 1;
+            if (val.substr(lineStart, 2) === '  ') {
+              this.configYamlEditor.value = val.substring(0, lineStart) + val.substring(lineStart + 2);
+              this.configYamlEditor.selectionStart = Math.max(lineStart, start - 2);
+              this.configYamlEditor.selectionEnd = Math.max(lineStart, end - 2);
+            } else if (val.charAt(lineStart) === ' ') {
+              this.configYamlEditor.value = val.substring(0, lineStart) + val.substring(lineStart + 1);
+              this.configYamlEditor.selectionStart = Math.max(lineStart, start - 1);
+              this.configYamlEditor.selectionEnd = Math.max(lineStart, end - 1);
+            }
+          } else {
+            this.configYamlEditor.value = val.substring(0, start) + '  ' + val.substring(end);
+            this.configYamlEditor.selectionStart = this.configYamlEditor.selectionEnd = start + 2;
+          }
+          this.onConfigEditorChange();
+        }
+      });
+
+      this.configYamlEditor.addEventListener('input', () => {
+        this.onConfigEditorChange();
+      });
+    }
 
     // Reload button
     if (this.btnReloadConfig) {
@@ -858,6 +974,44 @@ class AutoWGApp {
     }
   }
 
+  switchConfigView(view) {
+    if (view === 'yaml') {
+      // Sync form data into YAML textarea before displaying raw editor
+      if (this.activeConfigView === 'form') {
+        try {
+          const cfg = this.collectConfigFromForm();
+          const yamlStr = this.generateYamlFromConfig(cfg);
+          if (this.configYamlEditor) {
+            this.configYamlEditor.value = yamlStr;
+            this.onConfigEditorChange();
+          }
+        } catch (e) {
+          console.warn('Could not serialize form to YAML:', e);
+        }
+      }
+      if (this.configFormContainer) this.configFormContainer.style.display = 'none';
+      if (this.configRawContainer) this.configRawContainer.style.display = 'flex';
+      this.btnViewForm?.classList.remove('active');
+      this.btnViewYaml?.classList.add('active');
+      this.activeConfigView = 'yaml';
+    } else {
+      // Switch back to visual form UI
+      if (this.configRawContainer) this.configRawContainer.style.display = 'none';
+      if (this.configFormContainer) this.configFormContainer.style.display = 'flex';
+      this.btnViewYaml?.classList.remove('active');
+      this.btnViewForm?.classList.add('active');
+      this.activeConfigView = 'form';
+    }
+  }
+
+  onConfigFormChange() {
+    this.configIsDirty = true;
+    if (this.configSyncBadge) {
+      this.configSyncBadge.textContent = '● Unsaved Changes';
+      this.configSyncBadge.className = 'config-sync-pill sync-dirty';
+    }
+  }
+
   onConfigEditorChange() {
     if (!this.configYamlEditor) return;
     const currentVal = this.configYamlEditor.value;
@@ -879,6 +1033,468 @@ class AutoWGApp {
         this.configSyncBadge.className = 'config-sync-pill sync-ok';
       }
     }
+  }
+
+  updateTunnelCount() {
+    if (!this.tunnelFormCount || !this.tunnelCardsContainer) return;
+    const count = this.tunnelCardsContainer.querySelectorAll('.tunnel-form-card').length;
+    this.tunnelFormCount.textContent = `${count} tunnel${count === 1 ? '' : 's'}`;
+  }
+
+  renderConfigForm(cfg) {
+    this.parsedConfig = cfg;
+
+    // 1. Operating Mode
+    const isClient = (cfg.mode || '').toLowerCase() === 'client';
+    if (this.cfgModeClient) this.cfgModeClient.checked = isClient;
+    if (this.cfgModeServer) this.cfgModeServer.checked = !isClient;
+    if (this.routingFieldsSection) {
+      this.routingFieldsSection.style.display = isClient ? 'flex' : 'none';
+    }
+
+    // 2. Client Route Failover
+    if (this.cfgRoutingEnabled) this.cfgRoutingEnabled.checked = cfg.routing ? cfg.routing.enabled : true;
+    if (this.cfgRoutingTable) this.cfgRoutingTable.value = cfg.routing?.table ?? 200;
+    if (this.cfgRoutingMode) this.cfgRoutingMode.value = cfg.routing?.mode || 'sticky';
+    if (this.cfgRoutingMetric) this.cfgRoutingMetric.value = cfg.routing?.metric ?? 100;
+
+    // 3. Managed WireGuard Interfaces
+    if (this.tunnelCardsContainer) {
+      this.tunnelCardsContainer.innerHTML = '';
+      const tunnels = cfg.tunnels || [];
+      tunnels.forEach(t => {
+        this.addTunnelCard(t, false);
+      });
+      this.updateTunnelCount();
+    }
+
+    // 4. Global Shell Hooks
+    if (this.cfgPostUp) this.cfgPostUp.value = (cfg.post_up || []).join('\n');
+    if (this.cfgPreDown) this.cfgPreDown.value = (cfg.pre_down || []).join('\n');
+
+    // 5. Web Admin Panel
+    if (this.cfgWebEnabled) this.cfgWebEnabled.checked = cfg.web ? cfg.web.enabled : true;
+    if (this.cfgWebListen) this.cfgWebListen.value = cfg.web?.listen_addr || '0.0.0.0:8080';
+    if (this.cfgWebAllowedIPs) this.cfgWebAllowedIPs.value = (cfg.web?.allowed_ips || []).join('\n');
+    if (this.cfgWebUser) this.cfgWebUser.value = cfg.web?.username || '';
+    if (this.cfgWebPass) {
+      this.storedWebPassword = cfg.web?.password || '';
+      this.cfgWebPass.value = this.storedWebPassword ? '********' : '';
+    }
+
+    // 6. Public Status Page
+    if (this.cfgStatusEnabled) this.cfgStatusEnabled.checked = cfg.status_page ? cfg.status_page.enabled : false;
+    if (this.cfgStatusListen) this.cfgStatusListen.value = cfg.status_page?.listen_addr || '0.0.0.0:8081';
+    if (this.cfgStatusTitle) this.cfgStatusTitle.value = cfg.status_page?.title || 'Service Status';
+  }
+
+  addTunnelCard(tunnel = {}, isNew = false) {
+    if (!this.tunnelCardsContainer) return;
+
+    const card = document.createElement('div');
+    card.className = 'tunnel-form-card';
+
+    const targetIPs = (tunnel.target_ips && tunnel.target_ips.length > 0)
+      ? tunnel.target_ips
+      : (tunnel.target_ip ? [tunnel.target_ip] : []);
+    const targetIPsText = targetIPs.join('\n');
+
+    const isHunting = tunnel.hunting !== false;
+    const isIptables = tunnel.iptables !== false;
+
+    card.innerHTML = `
+      <div class="tunnel-card-header">
+        <div class="tunnel-card-left">
+          <span class="tunnel-card-title">${escapeHtml(tunnel.interface || 'new_wg')}</span>
+          <span class="badge-count tunnel-card-name-tag">${escapeHtml(tunnel.name || '')}</span>
+          <span class="tunnel-card-badge ${isHunting ? 'hunting' : 'passive'}">
+            ${isHunting ? 'Hunting Active' : 'Passive (No Rotation)'}
+          </span>
+        </div>
+        <button type="button" class="btn-danger-sm btn-remove-tunnel" title="Remove this tunnel interface">✕ Remove</button>
+      </div>
+
+      <div class="form-grid-2">
+        <div class="form-group">
+          <label class="form-label">WireGuard Interface Name <span style="color:var(--danger)">*</span></label>
+          <input type="text" class="form-input t-interface" value="${escapeHtml(tunnel.interface || '')}" placeholder="e.g. wg0 or wgBridge0" required spellcheck="false">
+          <span class="form-hint">Matches system interface name (ip link show)</span>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Descriptive Name</label>
+          <input type="text" class="form-input t-name" value="${escapeHtml(tunnel.name || '')}" placeholder="e.g. Frankfurt-VPS or Client-A" spellcheck="false">
+          <span class="form-hint">Display name shown in web dashboard & logs</span>
+        </div>
+      </div>
+
+      <div class="form-grid-2">
+        <div class="form-group">
+          <label class="form-label">Local Forwarded Port Range</label>
+          <input type="text" class="form-input t-port-range" value="${escapeHtml(tunnel.port_range || '20000-30000')}" placeholder="20000-30000" spellcheck="false">
+          <span class="form-hint">Range redirected by iptables to local WG listen port</span>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Remote Peer Port Range</label>
+          <input type="text" class="form-input t-remote-port-range" value="${escapeHtml(tunnel.remote_port_range || '20000-30000')}" placeholder="20000-30000" spellcheck="false">
+          <span class="form-hint">Candidate destination ports probed when connection stalls</span>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Target Destination IPs / Hostnames (Dual-Stack IPv4 / IPv6 / Domains)</label>
+        <textarea class="form-textarea t-target-ips" rows="2" placeholder="198.51.100.1&#10;2001:db8::1&#10;vps.example.com" spellcheck="false">${escapeHtml(targetIPsText)}</textarea>
+        <span class="form-hint">One destination per line. Auto-WG rotates through IPv4 and IPv6 targets if DPI blocks one. Domains are resolved on each hunt attempt.</span>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Peer Public Key (optional)</label>
+        <input type="text" class="form-input t-peer-pubkey" value="${escapeHtml(tunnel.peer_public_key || '')}" placeholder="Base64 WireGuard peer public key" spellcheck="false">
+        <span class="form-hint">Auto-detected from interface if left blank</span>
+      </div>
+
+      <div class="tunnel-card-toggles">
+        <label class="switch-label">
+          <input type="checkbox" class="t-hunting" ${isHunting ? 'checked' : ''}>
+          <span class="switch-slider"></span>
+          <span class="switch-text">Autonomous Port Hunting (active port rotation on stall)</span>
+        </label>
+        <label class="switch-label">
+          <input type="checkbox" class="t-iptables" ${isIptables ? 'checked' : ''}>
+          <span class="switch-slider"></span>
+          <span class="switch-text">Manage iptables REDIRECT NAT rule</span>
+        </label>
+      </div>
+
+      <!-- Collapsible Advanced & Ping Settings -->
+      <div class="tunnel-advanced-box">
+        <div class="tunnel-advanced-header">
+          <span>▶ Advanced & In-Tunnel Ping Settings</span>
+          <span class="advanced-toggle-icon">▼</span>
+        </div>
+        <div class="tunnel-advanced-body collapsed">
+          <div class="form-sub-header">
+            <h4>In-Tunnel ICMP Ping (Fast Link Failure Detection)</h4>
+            <label class="switch-label">
+              <input type="checkbox" class="t-ping-enabled" ${tunnel.tunnel_ping?.enabled ? 'checked' : ''}>
+              <span class="switch-slider"></span>
+              <span class="switch-text">Enable In-Tunnel Ping</span>
+            </label>
+          </div>
+
+          <div class="form-grid-3">
+            <div class="form-group">
+              <label class="form-label">Ping Target IP</label>
+              <input type="text" class="form-input t-ping-target" value="${escapeHtml(tunnel.tunnel_ping?.target_ip || '')}" placeholder="e.g. 10.100.0.1" spellcheck="false">
+              <span class="form-hint">In-tunnel IP of peer</span>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Ping Interval</label>
+              <input type="text" class="form-input t-ping-interval" value="${escapeHtml(formatDuration(tunnel.tunnel_ping?.interval, '2s'))}" placeholder="2s" spellcheck="false">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Failure Threshold</label>
+              <input type="number" class="form-input t-ping-threshold" value="${tunnel.tunnel_ping?.failure_threshold || 3}" placeholder="3">
+              <span class="form-hint">Consecutive failed pings before hunt</span>
+            </div>
+          </div>
+
+          <div class="form-sub-header" style="margin-top: 10px;">
+            <h4>Timing & Timeouts</h4>
+          </div>
+          <div class="form-grid-3">
+            <div class="form-group">
+              <label class="form-label">Check Interval</label>
+              <input type="text" class="form-input t-check-interval" value="${escapeHtml(formatDuration(tunnel.check_interval, '3s'))}" placeholder="3s" spellcheck="false">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Handshake Timeout</label>
+              <input type="text" class="form-input t-handshake-timeout" value="${escapeHtml(formatDuration(tunnel.handshake_timeout, '60s'))}" placeholder="60s" spellcheck="false">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Stagger Cycle Timeout</label>
+              <input type="text" class="form-input t-cycle-timeout" value="${escapeHtml(formatDuration(tunnel.cycle_timeout, '8s'))}" placeholder="8s" spellcheck="false">
+            </div>
+          </div>
+
+          <div class="form-group" style="margin-top: 6px;">
+            <label class="form-label">Persistent History File</label>
+            <input type="text" class="form-input t-history-file" value="${escapeHtml(tunnel.history_file || '')}" placeholder="Leave empty for default or 'off' to disable" spellcheck="false">
+          </div>
+
+          <div class="form-grid-2" style="margin-top: 6px;">
+            <div class="form-group">
+              <label class="form-label">Tunnel Post-Up Shell Commands (one per line)</label>
+              <textarea class="form-textarea t-post-up" rows="2" placeholder="e.g. iptables -t nat -I POSTROUTING ..." spellcheck="false">${escapeHtml((tunnel.post_up || []).join('\n'))}</textarea>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Tunnel Pre-Down Shell Commands (one per line)</label>
+              <textarea class="form-textarea t-pre-down" rows="2" placeholder="e.g. iptables -t nat -D POSTROUTING ..." spellcheck="false">${escapeHtml((tunnel.pre_down || []).join('\n'))}</textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    // Interactive element wiring within the card
+    const ifaceInput = card.querySelector('.t-interface');
+    const nameInput = card.querySelector('.t-name');
+    const titleEl = card.querySelector('.tunnel-card-title');
+    const nameTagEl = card.querySelector('.tunnel-card-name-tag');
+    const huntingInput = card.querySelector('.t-hunting');
+    const badgeEl = card.querySelector('.tunnel-card-badge');
+
+    ifaceInput?.addEventListener('input', () => {
+      if (titleEl) titleEl.textContent = ifaceInput.value || 'new_wg';
+    });
+    nameInput?.addEventListener('input', () => {
+      if (nameTagEl) nameTagEl.textContent = nameInput.value;
+    });
+    huntingInput?.addEventListener('change', () => {
+      if (badgeEl) {
+        if (huntingInput.checked) {
+          badgeEl.textContent = 'Hunting Active';
+          badgeEl.className = 'tunnel-card-badge hunting';
+        } else {
+          badgeEl.textContent = 'Passive (No Rotation)';
+          badgeEl.className = 'tunnel-card-badge passive';
+        }
+      }
+    });
+
+    // Advanced accordion toggle
+    const advHeader = card.querySelector('.tunnel-advanced-header');
+    const advBody = card.querySelector('.tunnel-advanced-body');
+    const advIcon = card.querySelector('.advanced-toggle-icon');
+    advHeader?.addEventListener('click', () => {
+      const isCollapsed = advBody.classList.contains('collapsed');
+      advBody.classList.toggle('collapsed', !isCollapsed);
+      if (advIcon) advIcon.textContent = isCollapsed ? '▲' : '▼';
+    });
+
+    // Remove tunnel button
+    const btnRemove = card.querySelector('.btn-remove-tunnel');
+    btnRemove?.addEventListener('click', () => {
+      const iface = ifaceInput?.value.trim() || 'this tunnel';
+      if (confirm(`Remove interface "${iface}" from configuration?`)) {
+        card.remove();
+        this.updateTunnelCount();
+        this.onConfigFormChange();
+      }
+    });
+
+    this.tunnelCardsContainer.appendChild(card);
+    this.updateTunnelCount();
+
+    if (isNew) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      ifaceInput?.focus();
+    }
+  }
+
+  collectConfigFromForm() {
+    const mode = this.cfgModeClient?.checked ? 'client' : 'server';
+
+    const routing = {
+      enabled: this.cfgRoutingEnabled ? this.cfgRoutingEnabled.checked : true,
+      table: parseInt(this.cfgRoutingTable?.value, 10) || 200,
+      mode: this.cfgRoutingMode?.value || 'sticky',
+      metric: parseInt(this.cfgRoutingMetric?.value, 10) || 100
+    };
+
+    const tunnels = [];
+    const cards = this.tunnelCardsContainer ? this.tunnelCardsContainer.querySelectorAll('.tunnel-form-card') : [];
+    cards.forEach(card => {
+      const iface = card.querySelector('.t-interface')?.value.trim() || '';
+      const name = card.querySelector('.t-name')?.value.trim() || iface;
+      const portRange = card.querySelector('.t-port-range')?.value.trim() || '20000-30000';
+      const remotePortRange = card.querySelector('.t-remote-port-range')?.value.trim() || '20000-30000';
+      const hunting = card.querySelector('.t-hunting')?.checked ?? true;
+      const iptables = card.querySelector('.t-iptables')?.checked ?? true;
+      const peerPubKey = card.querySelector('.t-peer-pubkey')?.value.trim() || '';
+
+      const targetIpsRaw = card.querySelector('.t-target-ips')?.value || '';
+      const targetIps = targetIpsRaw.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+
+      const pingEnabled = card.querySelector('.t-ping-enabled')?.checked ?? false;
+      const pingTarget = card.querySelector('.t-ping-target')?.value.trim() || '';
+      const pingInterval = card.querySelector('.t-ping-interval')?.value.trim() || '2s';
+      const pingThreshold = parseInt(card.querySelector('.t-ping-threshold')?.value, 10) || 3;
+
+      const checkInterval = card.querySelector('.t-check-interval')?.value.trim() || '3s';
+      const handshakeTimeout = card.querySelector('.t-handshake-timeout')?.value.trim() || '60s';
+      const cycleTimeout = card.querySelector('.t-cycle-timeout')?.value.trim() || '8s';
+      const historyFile = card.querySelector('.t-history-file')?.value.trim() || '';
+
+      const postUpRaw = card.querySelector('.t-post-up')?.value || '';
+      const postUp = postUpRaw.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+      const preDownRaw = card.querySelector('.t-pre-down')?.value || '';
+      const preDown = preDownRaw.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+
+      const tunnelObj = {
+        interface: iface,
+        name: name,
+        port_range: portRange,
+        remote_port_range: remotePortRange,
+        hunting: hunting,
+        iptables: iptables,
+        target_ips: targetIps,
+        target_ip: targetIps.length > 0 ? targetIps[0] : '',
+        peer_public_key: peerPubKey,
+        check_interval: checkInterval,
+        handshake_timeout: handshakeTimeout,
+        cycle_timeout: cycleTimeout,
+        tunnel_ping: {
+          enabled: pingEnabled,
+          target_ip: pingTarget,
+          interval: pingInterval,
+          failure_threshold: pingThreshold
+        }
+      };
+      if (historyFile) tunnelObj.history_file = historyFile;
+      if (postUp.length > 0) tunnelObj.post_up = postUp;
+      if (preDown.length > 0) tunnelObj.pre_down = preDown;
+
+      tunnels.push(tunnelObj);
+    });
+
+    const postUpGlobalRaw = this.cfgPostUp?.value || '';
+    const postUpGlobal = postUpGlobalRaw.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+    const preDownGlobalRaw = this.cfgPreDown?.value || '';
+    const preDownGlobal = preDownGlobalRaw.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+
+    const webAllowedRaw = this.cfgWebAllowedIPs?.value || '';
+    const webAllowed = webAllowedRaw.split(/[\n,]+/).map(s => s.trim()).filter(s => s.length > 0);
+
+    let passVal = this.cfgWebPass?.value || '';
+    if (passVal === '********') {
+      passVal = this.storedWebPassword;
+    }
+
+    const web = {
+      enabled: this.cfgWebEnabled?.checked ?? true,
+      listen_addr: this.cfgWebListen?.value.trim() || '0.0.0.0:8080',
+      username: this.cfgWebUser?.value.trim() || '',
+      password: passVal,
+      allowed_ips: webAllowed
+    };
+
+    const statusPage = {
+      enabled: this.cfgStatusEnabled?.checked ?? false,
+      listen_addr: this.cfgStatusListen?.value.trim() || '0.0.0.0:8081',
+      title: this.cfgStatusTitle?.value.trim() || 'Service Status'
+    };
+
+    return {
+      mode: mode,
+      routing: routing,
+      tunnels: tunnels,
+      post_up: postUpGlobal,
+      pre_down: preDownGlobal,
+      web: web,
+      status_page: statusPage
+    };
+  }
+
+  generateYamlFromConfig(cfg) {
+    let lines = [];
+    lines.push('# Auto-WG Configuration File');
+    lines.push(`mode: "${cfg.mode || 'server'}"`);
+    lines.push('');
+
+    if (cfg.mode === 'client' || (cfg.routing && cfg.routing.enabled)) {
+      lines.push('routing:');
+      lines.push(`  enabled: ${cfg.routing.enabled ? 'true' : 'false'}`);
+      lines.push(`  table: ${cfg.routing.table || 200}`);
+      lines.push(`  mode: "${cfg.routing.mode || 'sticky'}"`);
+      lines.push(`  metric: ${cfg.routing.metric || 100}`);
+      lines.push('');
+    }
+
+    lines.push('tunnels:');
+    for (const t of cfg.tunnels) {
+      lines.push(`  - interface: "${t.interface}"`);
+      if (t.name) lines.push(`    name: "${t.name}"`);
+      if (t.port_range) lines.push(`    port_range: "${t.port_range}"`);
+      if (t.remote_port_range) lines.push(`    remote_port_range: "${t.remote_port_range}"`);
+      if (t.hunting !== undefined) lines.push(`    hunting: ${t.hunting ? 'true' : 'false'}`);
+      if (t.iptables !== undefined) lines.push(`    iptables: ${t.iptables ? 'true' : 'false'}`);
+      if (t.peer_public_key) lines.push(`    peer_public_key: "${t.peer_public_key}"`);
+
+      if (t.target_ips && t.target_ips.length > 0) {
+        lines.push('    target_ips:');
+        for (const ip of t.target_ips) {
+          lines.push(`      - "${ip}"`);
+        }
+      } else if (t.target_ip) {
+        lines.push(`    target_ip: "${t.target_ip}"`);
+      }
+
+      if (t.tunnel_ping && (t.tunnel_ping.enabled || t.tunnel_ping.target_ip)) {
+        lines.push('    tunnel_ping:');
+        lines.push(`      enabled: ${t.tunnel_ping.enabled ? 'true' : 'false'}`);
+        if (t.tunnel_ping.target_ip) lines.push(`      target_ip: "${t.tunnel_ping.target_ip}"`);
+        if (t.tunnel_ping.interval) lines.push(`      interval: "${t.tunnel_ping.interval}"`);
+        if (t.tunnel_ping.failure_threshold) lines.push(`      failure_threshold: ${t.tunnel_ping.failure_threshold}`);
+      }
+
+      if (t.check_interval && t.check_interval !== '3s') lines.push(`    check_interval: "${t.check_interval}"`);
+      if (t.handshake_timeout && t.handshake_timeout !== '60s') lines.push(`    handshake_timeout: "${t.handshake_timeout}"`);
+      if (t.cycle_timeout && t.cycle_timeout !== '8s') lines.push(`    cycle_timeout: "${t.cycle_timeout}"`);
+      if (t.history_file) lines.push(`    history_file: "${t.history_file}"`);
+
+      if (t.post_up && t.post_up.length > 0) {
+        lines.push('    post_up:');
+        for (const cmd of t.post_up) {
+          lines.push(`      - "${cmd.replace(/"/g, '\\"')}"`);
+        }
+      }
+      if (t.pre_down && t.pre_down.length > 0) {
+        lines.push('    pre_down:');
+        for (const cmd of t.pre_down) {
+          lines.push(`      - "${cmd.replace(/"/g, '\\"')}"`);
+        }
+      }
+      lines.push('');
+    }
+
+    if (cfg.post_up && cfg.post_up.length > 0) {
+      lines.push('post_up:');
+      for (const cmd of cfg.post_up) {
+        lines.push(`  - "${cmd.replace(/"/g, '\\"')}"`);
+      }
+      lines.push('');
+    }
+
+    if (cfg.pre_down && cfg.pre_down.length > 0) {
+      lines.push('pre_down:');
+      for (const cmd of cfg.pre_down) {
+        lines.push(`  - "${cmd.replace(/"/g, '\\"')}"`);
+      }
+      lines.push('');
+    }
+
+    lines.push('web:');
+    lines.push(`  enabled: ${cfg.web.enabled ? 'true' : 'false'}`);
+    lines.push(`  listen_addr: "${cfg.web.listen_addr || '0.0.0.0:8080'}"`);
+    if (cfg.web.username) lines.push(`  username: "${cfg.web.username}"`);
+    if (cfg.web.password && cfg.web.password !== '********') lines.push(`  password: "${cfg.web.password}"`);
+    if (cfg.web.allowed_ips && cfg.web.allowed_ips.length > 0) {
+      lines.push('  allowed_ips:');
+      for (const aip of cfg.web.allowed_ips) {
+        lines.push(`    - "${aip}"`);
+      }
+    }
+    lines.push('');
+
+    if (cfg.status_page && cfg.status_page.enabled) {
+      lines.push('status_page:');
+      lines.push(`  enabled: true`);
+      lines.push(`  listen_addr: "${cfg.status_page.listen_addr || '0.0.0.0:8081'}"`);
+      lines.push(`  title: "${cfg.status_page.title || 'Service Status'}"`);
+      lines.push('');
+    }
+
+    return lines.join('\n');
   }
 
   async loadConfigEditor(force = false) {
@@ -905,6 +1521,12 @@ class AutoWGApp {
         this.configYamlEditor.value = yamlContent;
       }
       this.configOriginalYaml = yamlContent;
+
+      // Populate Visual Form from parsed config
+      if (data.config) {
+        this.renderConfigForm(data.config);
+      }
+
       this.configIsDirty = false;
       this.configLoaded = true;
 
@@ -924,10 +1546,35 @@ class AutoWGApp {
   }
 
   async saveConfigEditor() {
-    if (!this.configYamlEditor) return;
-    const yamlContent = this.configYamlEditor.value;
+    let yamlPayload = '';
 
-    if (!yamlContent.trim()) {
+    if (this.activeConfigView === 'form') {
+      const cfg = this.collectConfigFromForm();
+
+      // Form validation before sending
+      if (!cfg.tunnels || cfg.tunnels.length === 0) {
+        this.showConfigAlert('Configuration Error: At least one WireGuard tunnel interface must be defined.', 'error');
+        return;
+      }
+
+      for (let i = 0; i < cfg.tunnels.length; i++) {
+        const t = cfg.tunnels[i];
+        if (!t.interface) {
+          this.showConfigAlert(`Configuration Error: Tunnel #${i + 1} is missing the required Interface Name (e.g. wg0).`, 'error');
+          return;
+        }
+      }
+
+      yamlPayload = this.generateYamlFromConfig(cfg);
+      if (this.configYamlEditor) {
+        this.configYamlEditor.value = yamlPayload;
+      }
+    } else {
+      if (!this.configYamlEditor) return;
+      yamlPayload = this.configYamlEditor.value;
+    }
+
+    if (!yamlPayload.trim()) {
       this.showConfigAlert('Configuration cannot be empty.', 'error');
       return;
     }
@@ -945,19 +1592,28 @@ class AutoWGApp {
         headers: {
           'Content-Type': 'text/yaml'
         },
-        body: yamlContent
+        body: yamlPayload
       });
 
       const data = await res.json().catch(() => null);
 
       if (res.ok) {
-        this.configOriginalYaml = yamlContent;
+        this.configOriginalYaml = yamlPayload;
         this.configIsDirty = false;
         this.onConfigEditorChange();
 
         this.showConfigAlert(`✓ Configuration successfully written to ${data?.path || 'startup file'} and applied live without restarting!`, 'success');
         this.showToast('✓ Config saved & applied live!');
         this.pollStatus();
+
+        // Refresh parsed config to ensure frontend is 100% in sync with disk and supervisor
+        const refRes = await fetch('/api/config');
+        if (refRes.ok) {
+          const refData = await refRes.json();
+          if (refData.config && this.activeConfigView === 'form') {
+            this.renderConfigForm(refData.config);
+          }
+        }
       } else {
         const errMsg = data?.error || `HTTP ${res.status}: Validation or save failed`;
         this.showConfigAlert('Configuration Error: ' + errMsg, 'error');
@@ -1030,6 +1686,25 @@ function escapeHtml(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+function formatDuration(val, fallback = '3s') {
+  if (val === undefined || val === null || val === '') return fallback;
+  if (typeof val === 'string') return val;
+  if (typeof val === 'number') {
+    if (val === 0) return '0s';
+    if (val >= 1e9 && val % 1e9 === 0) {
+      return (val / 1e9) + 's';
+    }
+    if (val >= 60e9 && val % 60e9 === 0) {
+      return (val / 60e9) + 'm';
+    }
+    if (val >= 1e6 && val % 1e6 === 0) {
+      return (val / 1e6) + 'ms';
+    }
+    return (val / 1e9).toFixed(1) + 's';
+  }
+  return fallback;
 }
 
 document.addEventListener('DOMContentLoaded', () => {

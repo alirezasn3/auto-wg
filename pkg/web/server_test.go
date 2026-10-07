@@ -179,6 +179,19 @@ tunnels:
 	if overlapW.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for port overlap, got %d", overlapW.Code)
 	}
+
+	// 6. POST /api/config with JSON containing YAML
+	jsonPayload := `{"yaml": "mode: \"client\"\nrouting:\n  enabled: true\n  table: 200\ntunnels:\n  - interface: \"wg0\"\n    port_range: \"20000-30000\"\n    remote_port_range: \"20000-30000\"\n    history_file: \"off\"\n"}`
+	jsonReq := httptest.NewRequest("POST", "/api/config", strings.NewReader(jsonPayload))
+	jsonReq.Header.Set("Content-Type", "application/json")
+	jsonW := httptest.NewRecorder()
+	s.handleConfig(jsonW, jsonReq)
+	if jsonW.Code != http.StatusOK {
+		t.Fatalf("POST /api/config with JSON failed %d: %s", jsonW.Code, jsonW.Body.String())
+	}
+	if sup.GetConfig().Mode != "client" {
+		t.Errorf("expected client mode after JSON update, got %s", sup.GetConfig().Mode)
+	}
 }
 
 func TestServerActionHunt(t *testing.T) {

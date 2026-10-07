@@ -321,19 +321,23 @@
         <div class="config-header">
           <div class="config-title-group">
             <div class="config-title-row">
-              <span class="section-tag">LIVE CONFIGURATION</span>
+              <span class="section-tag">CONFIGURATION MANAGEMENT</span>
               <div class="config-sync-row">
-                <h2>Startup Config File</h2>
+                <h2>Startup Config</h2>
                 <span id="configSyncBadge" class="config-sync-pill sync-ok">Synced with Disk</span>
               </div>
             </div>
             <div class="config-path-box">
-              <span class="config-path-label">Path:</span>
+              <span class="config-path-label">Startup File:</span>
               <code id="configFilePath" class="config-path-value">Loading...</code>
               <button class="btn-copy" id="btnCopyConfigPath" title="Copy Path">📋</button>
             </div>
           </div>
           <div class="config-actions">
+            <div class="view-mode-toggle">
+              <button id="btnViewForm" class="btn-toggle active" type="button">📋 Visual Form</button>
+              <button id="btnViewYaml" class="btn-toggle" type="button">📝 Raw YAML</button>
+            </div>
             <button id="btnReloadConfig" class="btn btn-secondary btn-sm" title="Discard unsaved changes and reload from disk">
               ↻ Reload from Disk
             </button>
@@ -345,11 +349,184 @@
 
         <div id="configAlert" class="config-alert hidden"></div>
 
-        <div class="editor-wrapper">
+        <!-- 1. VISUAL FORM UI (DEFAULT) -->
+        <div id="configFormContainer" class="config-form-container">
+          <!-- Form Section 1: Mode & Routing -->
+          <div class="form-card">
+            <div class="form-card-header">
+              <span class="form-card-tag">SYSTEM & ROUTING</span>
+              <h3>Operation Mode & Policy Routing</h3>
+            </div>
+            <div class="form-card-body">
+              <div class="form-group">
+                <label class="form-label">Operating Mode</label>
+                <div class="mode-selector">
+                  <label class="radio-card">
+                    <input type="radio" name="cfgMode" value="client" id="cfgModeClient" checked>
+                    <span class="radio-card-body">
+                      <span class="radio-title">Client Mode</span>
+                      <span class="radio-desc">Connects to foreign servers, manages upstream failover & policy routing table</span>
+                    </span>
+                  </label>
+                  <label class="radio-card">
+                    <input type="radio" name="cfgMode" value="server" id="cfgModeServer">
+                    <span class="radio-card-body">
+                      <span class="radio-title">Server Mode</span>
+                      <span class="radio-desc">Listens for client connections, supports bidirectional non-NAT hunting</span>
+                    </span>
+                  </label>
+                </div>
+              </div>
+
+              <!-- Routing Fields (Visible in Client Mode) -->
+              <div id="routingFieldsSection" class="routing-fields-box">
+                <div class="form-sub-header">
+                  <h4>Client Automatic Route Failover</h4>
+                  <label class="switch-label">
+                    <input type="checkbox" id="cfgRoutingEnabled" checked>
+                    <span class="switch-slider"></span>
+                    <span class="switch-text">Enable Route Failover</span>
+                  </label>
+                </div>
+                <div class="form-grid-3">
+                  <div class="form-group">
+                    <label class="form-label" for="cfgRoutingTable">Target Routing Table</label>
+                    <input type="number" id="cfgRoutingTable" class="form-input" value="200" placeholder="200">
+                    <span class="form-hint">e.g. 200 (keeps main routing table and SSH untouched)</span>
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label" for="cfgRoutingMode">Failover Mode</label>
+                    <select id="cfgRoutingMode" class="form-input">
+                      <option value="priority">Priority (prefer first healthy tunnel)</option>
+                      <option value="sticky">Sticky (stay on active tunnel until failure)</option>
+                    </select>
+                    <span class="form-hint">Sticky avoids route flapping; Priority always prefers link #1</span>
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label" for="cfgRoutingMetric">Route Metric</label>
+                    <input type="number" id="cfgRoutingMetric" class="form-input" value="100" placeholder="100">
+                    <span class="form-hint">Default route metric</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Form Section 2: Managed Tunnels -->
+          <div class="form-card">
+            <div class="form-card-header">
+              <div class="header-left-group">
+                <span class="form-card-tag">TUNNELS</span>
+                <h3>Managed WireGuard Interfaces</h3>
+                <span id="tunnelFormCount" class="badge-count">0 tunnels</span>
+              </div>
+              <button id="btnAddTunnel" class="btn btn-secondary btn-sm" type="button">
+                + Add Tunnel
+              </button>
+            </div>
+            <div class="form-card-body">
+              <div id="tunnelCardsContainer" class="tunnels-form-list">
+                <!-- Dynamically populated tunnel cards -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Form Section 3: Global Shell Hooks (PostUp & PreDown) -->
+          <div class="form-card collapsible-card">
+            <div class="form-card-header clickable" id="headerShellHooks">
+              <div class="header-left-group">
+                <span class="form-card-tag">SHELL HOOKS</span>
+                <h3>Global Post-Up & Pre-Down Commands</h3>
+              </div>
+              <span class="toggle-icon" id="toggleIconShell">▼</span>
+            </div>
+            <div class="form-card-body collapsed" id="bodyShellHooks">
+              <div class="form-grid-2">
+                <div class="form-group">
+                  <label class="form-label" for="cfgPostUp">Post-Up Shell Commands (one per line)</label>
+                  <textarea id="cfgPostUp" class="form-textarea" rows="4" placeholder="ip route replace default dev wgBridge0 table 200&#10;iptables -t nat -I POSTROUTING -o wgBridge0 -j MASQUERADE"></textarea>
+                  <span class="form-hint">Executed in order when Auto-WG starts</span>
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="cfgPreDown">Pre-Down Shell Commands (one per line)</label>
+                  <textarea id="cfgPreDown" class="form-textarea" rows="4" placeholder="iptables -t nat -D POSTROUTING -o wgBridge0 -j MASQUERADE&#10;ip route del default table 200 || true"></textarea>
+                  <span class="form-hint">Executed on shutdown before tunnels tear down</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Form Section 4: Web Admin & Status Page -->
+          <div class="form-card collapsible-card">
+            <div class="form-card-header clickable" id="headerWebSettings">
+              <div class="header-left-group">
+                <span class="form-card-tag">ADMIN & ACCESS</span>
+                <h3>Web Panel & Status Page Settings</h3>
+              </div>
+              <span class="toggle-icon" id="toggleIconWeb">▼</span>
+            </div>
+            <div class="form-card-body collapsed" id="bodyWebSettings">
+              <div class="form-grid-2">
+                <!-- Web Admin Panel -->
+                <div class="settings-sub-card">
+                  <div class="form-sub-header">
+                    <h4>Web Dashboard</h4>
+                    <label class="switch-label">
+                      <input type="checkbox" id="cfgWebEnabled" checked>
+                      <span class="switch-slider"></span>
+                      <span class="switch-text">Enabled</span>
+                    </label>
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label" for="cfgWebListen">Listen Address</label>
+                    <input type="text" id="cfgWebListen" class="form-input" value="0.0.0.0:8080" placeholder="0.0.0.0:8080">
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label" for="cfgWebAllowedIPs">Allowed Client IPs / CIDRs (comma or newline separated)</label>
+                    <textarea id="cfgWebAllowedIPs" class="form-textarea" rows="2" placeholder="10.0.0.2, 10.0.0.0/24 (leave empty to allow all)"></textarea>
+                  </div>
+                  <div class="form-grid-2">
+                    <div class="form-group">
+                      <label class="form-label" for="cfgWebUser">HTTP Username (optional)</label>
+                      <input type="text" id="cfgWebUser" class="form-input" placeholder="admin">
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label" for="cfgWebPass">HTTP Password (optional)</label>
+                      <input type="password" id="cfgWebPass" class="form-input" placeholder="••••••••">
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Public Status Page -->
+                <div class="settings-sub-card">
+                  <div class="form-sub-header">
+                    <h4>Public Status Page</h4>
+                    <label class="switch-label">
+                      <input type="checkbox" id="cfgStatusEnabled">
+                      <span class="switch-slider"></span>
+                      <span class="switch-text">Enabled</span>
+                    </label>
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label" for="cfgStatusListen">Listen Address</label>
+                    <input type="text" id="cfgStatusListen" class="form-input" value="0.0.0.0:8081" placeholder="0.0.0.0:8081">
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label" for="cfgStatusTitle">Status Page Title</label>
+                    <input type="text" id="cfgStatusTitle" class="form-input" value="Upstream Bridge Status" placeholder="Service Status">
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. RAW YAML EDITOR (SECONDARY / ADVANCED) -->
+        <div id="configRawContainer" class="editor-wrapper" style="display: none;">
           <div class="editor-toolbar">
             <div class="editor-toolbar-left">
               <span class="editor-tag">YAML</span>
-              <span class="editor-hint">Press <kbd>Tab</kbd> to indent with 2 spaces. Validated before writing to disk.</span>
+              <span class="editor-hint">Press <kbd>Tab</kbd> to indent with 2 spaces. Direct raw file representation.</span>
             </div>
             <div class="editor-toolbar-right">
               <span id="editorLineCount" class="editor-meta">0 lines</span>
@@ -359,51 +536,48 @@
         </div>
       </section>
 
-      <!-- Configuration Reference & Snippets Card -->
+      <!-- Configuration Reference Card -->
       <section class="card config-help-card">
         <div class="section-header">
           <div class="logs-title-group">
-            <h3>Configuration Guide & Quick Examples</h3>
+            <h3>Configuration Reference & Field Guide</h3>
           </div>
-          <button id="btnToggleHelp" class="btn btn-secondary btn-sm">Toggle Tips</button>
+          <button id="btnToggleHelp" class="btn btn-secondary btn-sm" type="button">Toggle Tips</button>
         </div>
         <div id="configHelpContent" class="config-help-body">
           <div class="help-grid">
             <div class="help-box">
-              <h4>🌐 Multi-Destination Candidate IPs (IPv4 + IPv6)</h4>
-              <p>Configure multiple candidate endpoints under <code>target_ips</code>. Auto-WG will hunt across both v4 and v6:</p>
-              <pre><code>tunnels:
-  - interface: "wgBridge0"
-    target_ips:
-      - "198.51.100.1"
-      - "2001:db8::1"
-      - "vps.example.com"</code></pre>
+              <h4>🌐 Dual-Stack Target IPs (IPv4 + IPv6 + Domains)</h4>
+              <p>Enter multiple destinations in <code>target_ips</code>. Auto-WG rotates through IPv4 and IPv6 to bypass single-IP blocks:</p>
+              <pre><code>target_ips:
+  - "198.51.100.1"
+  - "2001:db8::1"
+  - "vps.example.com"</code></pre>
             </div>
             <div class="help-box">
-              <h4>🔀 Policy Routing & Failover (Table 200)</h4>
-              <p>Automatically manage default route failover across multiple upstream links in client mode:</p>
-              <pre><code>mode: "client"
-routing:
+              <h4>🔀 Policy Routing Failover (Table 200)</h4>
+              <p>Auto-WG dynamically manages <code>ip route replace default dev wgBridgeX table 200</code> when links stall:</p>
+              <pre><code>routing:
   enabled: true
   table: 200
-  mode: "priority" # "priority" or "sticky"
+  mode: "priority"
   metric: 100</code></pre>
             </div>
             <div class="help-box">
-              <h4>📡 In-Tunnel Health Check (Fast Ping)</h4>
-              <p>Detect DPI packet dropping within 5-10 seconds via ICMP before the WireGuard handshake timer expires:</p>
-              <pre><code>    tunnel_ping:
-      enabled: true
-      target_ip: "10.100.0.1"
-      interval: 2s
-      failure_threshold: 3</code></pre>
+              <h4>📡 Fast In-Tunnel ICMP Ping</h4>
+              <p>Sends periodic lightweight pings through the tunnel. Confirms dead links in 5-10s before handshakes time out:</p>
+              <pre><code>tunnel_ping:
+  enabled: true
+  target_ip: "10.100.0.1"
+  interval: 2s
+  failure_threshold: 3</code></pre>
             </div>
             <div class="help-box">
-              <h4>🛡️ Passive Peer Mode (MikroTik / Static)</h4>
-              <p>For remote peers that don't run Auto-WG, set <code>hunting: false</code> to monitor without rotating ports:</p>
-              <pre><code>    hunting: false # Passive monitoring only
-    port_range: "20000-30000"
-    iptables: true</code></pre>
+              <h4>🛡️ Passive Monitoring Mode (MikroTik / Static)</h4>
+              <p>Disable hunting for peers running stock WireGuard without Auto-WG. Still monitors & pings without port rotation:</p>
+              <pre><code>hunting: false
+port_range: "20000-30000"
+iptables: true</code></pre>
             </div>
           </div>
         </div>
