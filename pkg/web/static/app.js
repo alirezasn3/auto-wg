@@ -14,11 +14,27 @@ class AutoWGApp {
     this.initActions();
     this.initCopyButtons();
     this.initLogControls();
+    this.initConfigEditor();
     this.startStatusPolling();
     this.connectLogStream();
   }
 
   initElements() {
+    // Configuration Editor Elements
+    this.configYamlEditor = document.getElementById('configYamlEditor');
+    this.configFilePath = document.getElementById('configFilePath');
+    this.configSyncBadge = document.getElementById('configSyncBadge');
+    this.configAlert = document.getElementById('configAlert');
+    this.btnSaveConfig = document.getElementById('btnSaveConfig');
+    this.btnReloadConfig = document.getElementById('btnReloadConfig');
+    this.btnCopyConfigPath = document.getElementById('btnCopyConfigPath');
+    this.editorLineCount = document.getElementById('editorLineCount');
+    this.btnToggleHelp = document.getElementById('btnToggleHelp');
+    this.configHelpContent = document.getElementById('configHelpContent');
+    this.configOriginalYaml = '';
+    this.configIsDirty = false;
+    this.configLoaded = false;
+
     // Multi-Tunnel Switcher Elements
     this.tunnelSwitcherCard = document.getElementById('tunnelSwitcherCard');
     this.tunnelTabs = document.getElementById('tunnelTabs');
@@ -145,6 +161,10 @@ class AutoWGApp {
 
     if (tabId === 'logs' && this.autoScroll && this.terminal) {
       this.terminal.scrollTop = this.terminal.scrollHeight;
+    }
+
+    if (tabId === 'config' && !this.configLoaded) {
+      this.loadConfigEditor();
     }
   }
 
@@ -749,6 +769,227 @@ class AutoWGApp {
       if (this.logContainer) this.logContainer.innerHTML = '';
       if (this.miniLogContainer) this.miniLogContainer.innerHTML = '';
     });
+  }
+
+  initConfigEditor() {
+    if (!this.configYamlEditor) return;
+
+    // Warn before leaving if there are unsaved config edits
+    window.addEventListener('beforeunload', (e) => {
+      if (this.configIsDirty) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    });
+
+    // Handle Tab key inside textarea
+    this.configYamlEditor.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const start = this.configYamlEditor.selectionStart;
+        const end = this.configYamlEditor.selectionEnd;
+        const val = this.configYamlEditor.value;
+
+        if (e.shiftKey) {
+          // Shift+Tab: remove up to 2 leading spaces on current line
+          const lineStart = val.lastIndexOf('\n', start - 1) + 1;
+          if (val.substr(lineStart, 2) === '  ') {
+            this.configYamlEditor.value = val.substring(0, lineStart) + val.substring(lineStart + 2);
+            this.configYamlEditor.selectionStart = Math.max(lineStart, start - 2);
+            this.configYamlEditor.selectionEnd = Math.max(lineStart, end - 2);
+          } else if (val.charAt(lineStart) === ' ') {
+            this.configYamlEditor.value = val.substring(0, lineStart) + val.substring(lineStart + 1);
+            this.configYamlEditor.selectionStart = Math.max(lineStart, start - 1);
+            this.configYamlEditor.selectionEnd = Math.max(lineStart, end - 1);
+          }
+        } else {
+          // Tab: insert 2 spaces
+          this.configYamlEditor.value = val.substring(0, start) + '  ' + val.substring(end);
+          this.configYamlEditor.selectionStart = this.configYamlEditor.selectionEnd = start + 2;
+        }
+        this.onConfigEditorChange();
+      }
+    });
+
+    // Detect user edits
+    this.configYamlEditor.addEventListener('input', () => {
+      this.onConfigEditorChange();
+    });
+
+    // Reload button
+    if (this.btnReloadConfig) {
+      this.btnReloadConfig.addEventListener('click', async () => {
+        if (this.configIsDirty && !confirm('Discard unsaved configuration edits and reload from disk?')) {
+          return;
+        }
+        await this.loadConfigEditor(true);
+      });
+    }
+
+    // Save button
+    if (this.btnSaveConfig) {
+      this.btnSaveConfig.addEventListener('click', () => {
+        this.saveConfigEditor();
+      });
+    }
+
+    // Copy path button
+    if (this.btnCopyConfigPath) {
+      this.btnCopyConfigPath.addEventListener('click', async () => {
+        const path = this.configFilePath?.textContent;
+        if (path && path !== 'Loading...') {
+          try {
+            await navigator.clipboard.writeText(path);
+            this.showToast('✓ Copied config path to clipboard');
+          } catch {
+            this.showToast('Path: ' + path);
+          }
+        }
+      });
+    }
+
+    // Toggle help card
+    if (this.btnToggleHelp && this.configHelpContent) {
+      this.btnToggleHelp.addEventListener('click', () => {
+        const isHidden = this.configHelpContent.style.display === 'none';
+        this.configHelpContent.style.display = isHidden ? 'block' : 'none';
+        this.btnToggleHelp.textContent = isHidden ? 'Hide Tips' : 'Toggle Tips';
+      });
+    }
+  }
+
+  onConfigEditorChange() {
+    if (!this.configYamlEditor) return;
+    const currentVal = this.configYamlEditor.value;
+
+    // Update line count
+    const lines = currentVal.split('\n').length;
+    if (this.editorLineCount) {
+      this.editorLineCount.textContent = `${lines} line${lines === 1 ? '' : 's'}`;
+    }
+
+    // Check dirty state
+    this.configIsDirty = (currentVal !== this.configOriginalYaml);
+    if (this.configSyncBadge) {
+      if (this.configIsDirty) {
+        this.configSyncBadge.textContent = '● Unsaved Changes';
+        this.configSyncBadge.className = 'config-sync-pill sync-dirty';
+      } else {
+        this.configSyncBadge.textContent = 'Synced with Disk';
+        this.configSyncBadge.className = 'config-sync-pill sync-ok';
+      }
+    }
+  }
+
+  async loadConfigEditor(force = false) {
+    if (this.configLoaded && !force) return;
+
+    if (this.configSyncBadge) {
+      this.configSyncBadge.textContent = 'Loading...';
+      this.configSyncBadge.className = 'config-sync-pill sync-saving';
+    }
+
+    try {
+      const res = await fetch('/api/config');
+      if (!res.ok) {
+        throw new Error(`Server returned HTTP ${res.status}`);
+      }
+      const data = await res.json();
+
+      if (this.configFilePath) {
+        this.configFilePath.textContent = data.path || 'config.yaml';
+      }
+
+      const yamlContent = data.yaml || '';
+      if (this.configYamlEditor) {
+        this.configYamlEditor.value = yamlContent;
+      }
+      this.configOriginalYaml = yamlContent;
+      this.configIsDirty = false;
+      this.configLoaded = true;
+
+      this.onConfigEditorChange();
+      this.hideConfigAlert();
+
+      if (force) {
+        this.showToast('✓ Reloaded configuration from disk');
+      }
+    } catch (err) {
+      this.showConfigAlert('Failed to load configuration from disk: ' + err.message, 'error');
+      if (this.configSyncBadge) {
+        this.configSyncBadge.textContent = 'Load Failed';
+        this.configSyncBadge.className = 'config-sync-pill sync-error';
+      }
+    }
+  }
+
+  async saveConfigEditor() {
+    if (!this.configYamlEditor) return;
+    const yamlContent = this.configYamlEditor.value;
+
+    if (!yamlContent.trim()) {
+      this.showConfigAlert('Configuration cannot be empty.', 'error');
+      return;
+    }
+
+    if (this.btnSaveConfig) this.btnSaveConfig.disabled = true;
+    if (this.configSyncBadge) {
+      this.configSyncBadge.textContent = 'Saving & Validating...';
+      this.configSyncBadge.className = 'config-sync-pill sync-saving';
+    }
+    this.hideConfigAlert();
+
+    try {
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/yaml'
+        },
+        body: yamlContent
+      });
+
+      const data = await res.json().catch(() => null);
+
+      if (res.ok) {
+        this.configOriginalYaml = yamlContent;
+        this.configIsDirty = false;
+        this.onConfigEditorChange();
+
+        this.showConfigAlert(`✓ Configuration successfully written to ${data?.path || 'startup file'} and applied live without restarting!`, 'success');
+        this.showToast('✓ Config saved & applied live!');
+        this.pollStatus();
+      } else {
+        const errMsg = data?.error || `HTTP ${res.status}: Validation or save failed`;
+        this.showConfigAlert('Configuration Error: ' + errMsg, 'error');
+        if (this.configSyncBadge) {
+          this.configSyncBadge.textContent = 'Validation Error';
+          this.configSyncBadge.className = 'config-sync-pill sync-error';
+        }
+        this.showToast('Save failed: check error details below', true);
+      }
+    } catch (err) {
+      this.showConfigAlert('Network request failed: ' + err.message, 'error');
+      if (this.configSyncBadge) {
+        this.configSyncBadge.textContent = 'Save Failed';
+        this.configSyncBadge.className = 'config-sync-pill sync-error';
+      }
+    } finally {
+      if (this.btnSaveConfig) {
+        setTimeout(() => { this.btnSaveConfig.disabled = false; }, 600);
+      }
+    }
+  }
+
+  showConfigAlert(message, type = 'error') {
+    if (!this.configAlert) return;
+    this.configAlert.textContent = message;
+    this.configAlert.className = `config-alert ${type}`;
+    this.configAlert.style.display = 'block';
+  }
+
+  hideConfigAlert() {
+    if (!this.configAlert) return;
+    this.configAlert.style.display = 'none';
   }
 }
 

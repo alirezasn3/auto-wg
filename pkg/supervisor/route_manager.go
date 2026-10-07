@@ -144,3 +144,16 @@ func (rm *RouteManager) GetActiveTunnel() string {
 	defer rm.mu.Unlock()
 	return rm.activeTunnel
 }
+
+// UpdateRoutingConfig updates routing settings and active tunnels in memory.
+func (rm *RouteManager) UpdateRoutingConfig(cfg config.RoutingConfig, tunnels map[string]*hunter.Hunter, tunnelOrder []string) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	rm.cfg = cfg
+	rm.tunnels = tunnels
+	rm.tunnelOrder = tunnelOrder
+	rm.log.Info("ROUTER", "Routing configuration updated (enabled: %v, mode: %s, table: %d, metric: %d)",
+		cfg.Enabled, cfg.Mode, cfg.Table, cfg.Metric)
+}
+

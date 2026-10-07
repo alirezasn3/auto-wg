@@ -3,8 +3,11 @@ package supervisor
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
+
+	"gopkg.in/yaml.v3"
 
 	"auto-wg/pkg/cmdexec"
 	"auto-wg/pkg/config"
@@ -25,29 +28,37 @@ type SupervisorStatus struct {
 }
 
 type Supervisor struct {
-	cfgPath      string
-	cfg          *config.Config
-	wgCtrl       *wg.Controller
-	iptMgr       *iptables.Manager
-	log          *logger.Logger
-	mu           sync.RWMutex
-	hunters      map[string]*hunter.Hunter
-	tunnelOrder  []string
-	routeManager *RouteManager
+	cfgPath       string
+	cfg           *config.Config
+	wgCtrl        *wg.Controller
+	iptMgr        *iptables.Manager
+	log           *logger.Logger
+	mu            sync.RWMutex
+	hunters       map[string]*hunter.Hunter
+	tunnelOrder   []string
+	hunterCancels map[string]context.CancelFunc
+	routeManager  *RouteManager
+	ctx           context.Context
 }
 
 // New creates a new Supervisor to manage multiple WireGuard tunnels.
 func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *iptables.Manager, log *logger.Logger) *Supervisor {
 	config.SetDefaults(cfg)
 
+	absPath, err := filepath.Abs(cfgPath)
+	if err == nil {
+		cfgPath = absPath
+	}
+
 	s := &Supervisor{
-		cfgPath:     cfgPath,
-		cfg:         cfg,
-		wgCtrl:      wgCtrl,
-		iptMgr:      iptMgr,
-		log:         log,
-		hunters:     make(map[string]*hunter.Hunter),
-		tunnelOrder: make([]string, 0, len(cfg.Tunnels)),
+		cfgPath:       cfgPath,
+		cfg:           cfg,
+		wgCtrl:        wgCtrl,
+		iptMgr:        iptMgr,
+		log:           log,
+		hunters:       make(map[string]*hunter.Hunter),
+		tunnelOrder:   make([]string, 0, len(cfg.Tunnels)),
+		hunterCancels: make(map[string]context.CancelFunc),
 	}
 
 	cfgDir := filepath.Dir(cfgPath)
@@ -80,6 +91,10 @@ func (s *Supervisor) handleStateChange(h *hunter.Hunter, oldState, newState stri
 
 // Start launches all tunnels, executes PostUp commands, and monitors connections.
 func (s *Supervisor) Start(ctx context.Context) {
+	s.mu.Lock()
+	s.ctx = ctx
+	s.mu.Unlock()
+
 	s.log.Info("SUPERVISOR", "=================================================================")
 	s.log.Info("SUPERVISOR", " Starting Auto-WG Supervisor (Mode: %s, %d managed tunnels)", s.cfg.Mode, len(s.hunters))
 	s.log.Info("SUPERVISOR", "=================================================================")
@@ -94,6 +109,7 @@ func (s *Supervisor) Start(ctx context.Context) {
 
 	// 2. Start each tunnel hunter and run per-tunnel PostUp
 	var wgGroup sync.WaitGroup
+	s.mu.Lock()
 	for _, iface := range s.tunnelOrder {
 		h := s.hunters[iface]
 		if h == nil {
@@ -101,7 +117,7 @@ func (s *Supervisor) Start(ctx context.Context) {
 		}
 
 		// Per-tunnel PostUp
-		tCfg := s.getTunnelConfig(iface)
+		tCfg := s.getTunnelConfigLocked(iface)
 		if len(tCfg.PostUp) > 0 {
 			s.log.Info("SUPERVISOR", "[%s] Executing tunnel PostUp commands (%d commands)...", iface, len(tCfg.PostUp))
 			if err := cmdexec.RunCommands(ctx, tCfg.PostUp, fmt.Sprintf("POSTUP-%s", iface), s.log); err != nil {
@@ -110,20 +126,32 @@ func (s *Supervisor) Start(ctx context.Context) {
 		}
 
 		wgGroup.Add(1)
-		go func(hunterInstance *hunter.Hunter) {
+		hCtx, hCancel := context.WithCancel(ctx)
+		s.hunterCancels[iface] = hCancel
+		go func(hunterInstance *hunter.Hunter, c context.Context) {
 			defer wgGroup.Done()
-			hunterInstance.Start(ctx)
-		}(h)
+			hunterInstance.Start(c)
+		}(h, hCtx)
 	}
+	s.mu.Unlock()
 
 	// 3. Initial route evaluation if in client mode
-	if s.routeManager != nil {
-		s.routeManager.Evaluate()
+	s.mu.RLock()
+	rm := s.routeManager
+	s.mu.RUnlock()
+	if rm != nil {
+		rm.Evaluate()
 	}
 
 	// Wait for shutdown signal
 	<-ctx.Done()
 	s.log.Info("SUPERVISOR", "Shutdown signal received. Tearing down tunnels...")
+
+	s.mu.Lock()
+	for _, cancel := range s.hunterCancels {
+		cancel()
+	}
+	s.mu.Unlock()
 
 	// 4. Save persistent history for all tunnels
 	_ = s.SaveAllHistory()
@@ -150,6 +178,15 @@ func (s *Supervisor) Start(ctx context.Context) {
 
 	wgGroup.Wait()
 	s.log.Info("SUPERVISOR", "Supervisor stopped cleanly.")
+}
+
+func (s *Supervisor) getTunnelConfigLocked(iface string) config.TunnelConfig {
+	for _, t := range s.cfg.Tunnels {
+		if t.Interface == iface {
+			return t
+		}
+	}
+	return config.TunnelConfig{}
 }
 
 func (s *Supervisor) getTunnelConfig(iface string) config.TunnelConfig {
@@ -289,6 +326,144 @@ func (s *Supervisor) GetConfig() config.Config {
 	return *s.cfg
 }
 
+// GetConfigPath returns the absolute path of the startup configuration file.
+func (s *Supervisor) GetConfigPath() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfgPath
+}
+
+// GetRawConfigFile reads the raw content of the startup configuration file on disk.
+func (s *Supervisor) GetRawConfigFile() (string, error) {
+	s.mu.RLock()
+	filePath := s.cfgPath
+	s.mu.RUnlock()
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.mu.RLock()
+			defer s.mu.RUnlock()
+			yml, mErr := yaml.Marshal(s.cfg)
+			if mErr != nil {
+				return "", fmt.Errorf("read config file: %w", err)
+			}
+			return string(yml), nil
+		}
+		return "", fmt.Errorf("read config file %s: %w", filePath, err)
+	}
+
+	return string(data), nil
+}
+
+// SaveAndApplyConfig validates the YAML, atomically writes it to the startup file on disk,
+// and dynamically applies the changes live in-memory to running tunnels and routing.
+func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) {
+	var newCfg config.Config
+	if err := yaml.Unmarshal([]byte(yamlStr), &newCfg); err != nil {
+		return nil, fmt.Errorf("invalid YAML syntax: %w", err)
+	}
+
+	config.SetDefaults(&newCfg)
+	if err := config.Validate(&newCfg); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 1. Write atomically to startup config file
+	cfgDir := filepath.Dir(s.cfgPath)
+	if cfgDir != "" && cfgDir != "." {
+		if err := os.MkdirAll(cfgDir, 0755); err != nil {
+			return nil, fmt.Errorf("create config directory %s: %w", cfgDir, err)
+		}
+	}
+
+	tmpFile := s.cfgPath + ".tmp"
+	if err := os.WriteFile(tmpFile, []byte(yamlStr), 0600); err != nil {
+		return nil, fmt.Errorf("write temp config file: %w", err)
+	}
+	if err := os.Rename(tmpFile, s.cfgPath); err != nil {
+		_ = os.Remove(s.cfgPath)
+		if rErr := os.Rename(tmpFile, s.cfgPath); rErr != nil {
+			return nil, fmt.Errorf("replace config file %s: %w", s.cfgPath, rErr)
+		}
+	}
+
+	// 2. Set history file paths for tunnels
+	for i := range newCfg.Tunnels {
+		t := &newCfg.Tunnels[i]
+		if t.HistoryFile != "off" && t.HistoryFile != "none" {
+			if t.HistoryFile == "" {
+				t.HistoryFile = filepath.Join(cfgDir, fmt.Sprintf("history-%s.json", t.Interface))
+			} else if !filepath.IsAbs(t.HistoryFile) {
+				t.HistoryFile = filepath.Join(cfgDir, t.HistoryFile)
+			}
+		}
+	}
+
+	// 3. Map new tunnels by interface
+	newTunnelMap := make(map[string]config.TunnelConfig, len(newCfg.Tunnels))
+	var newOrder []string
+	for _, t := range newCfg.Tunnels {
+		newTunnelMap[t.Interface] = t
+		newOrder = append(newOrder, t.Interface)
+	}
+
+	// 4. Clean up removed tunnels
+	for iface, h := range s.hunters {
+		if _, exists := newTunnelMap[iface]; !exists {
+			s.log.Info("SUPERVISOR", "Removing tunnel %s (omitted from new configuration)", iface)
+			if cancel, ok := s.hunterCancels[iface]; ok {
+				cancel()
+				delete(s.hunterCancels, iface)
+			}
+			_ = h.SaveHistory()
+			if s.iptMgr != nil {
+				_ = s.iptMgr.RemoveRule(iface)
+			}
+			delete(s.hunters, iface)
+		}
+	}
+
+	// 5. Update existing tunnels or start newly added ones
+	for _, t := range newCfg.Tunnels {
+		if h, exists := s.hunters[t.Interface]; exists {
+			h.UpdateConfig(t)
+		} else {
+			s.log.Info("SUPERVISOR", "Adding new tunnel %s (%s)", t.Interface, t.Name)
+			h := hunter.New(t, s.wgCtrl, s.iptMgr, s.log, s.handleStateChange)
+			s.hunters[t.Interface] = h
+			if s.ctx != nil {
+				hCtx, hCancel := context.WithCancel(s.ctx)
+				s.hunterCancels[t.Interface] = hCancel
+				go h.Start(hCtx)
+			}
+		}
+	}
+
+	s.tunnelOrder = newOrder
+	s.cfg = &newCfg
+
+	// 6. Update RouteManager
+	if newCfg.Mode == "client" && newCfg.Routing.Enabled {
+		if s.routeManager == nil {
+			s.routeManager = NewRouteManager(newCfg.Routing, s.hunters, s.tunnelOrder, s.log)
+		} else {
+			s.routeManager.UpdateRoutingConfig(newCfg.Routing, s.hunters, s.tunnelOrder)
+		}
+		s.routeManager.Evaluate()
+	} else if s.routeManager != nil {
+		s.routeManager.UpdateRoutingConfig(newCfg.Routing, s.hunters, s.tunnelOrder)
+	}
+
+	s.log.Info("SUPERVISOR", "Configuration successfully saved to %s and applied live (%d active tunnels)",
+		s.cfgPath, len(s.hunters))
+
+	return &newCfg, nil
+}
+
 // UpdateConfig updates the in-memory supervisor configuration.
 func (s *Supervisor) UpdateConfig(newCfg *config.Config) error {
 	s.mu.Lock()
@@ -297,3 +472,4 @@ func (s *Supervisor) UpdateConfig(newCfg *config.Config) error {
 	s.cfg = newCfg
 	return nil
 }
+

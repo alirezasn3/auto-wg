@@ -99,7 +99,7 @@ func TestServerStatusAPI(t *testing.T) {
 func TestServerConfigAPI(t *testing.T) {
 	s, sup := setupTestServer(t)
 
-	// 1. GET /api/config
+	// 1. GET /api/config (JSON with inlined fields, path, and yaml)
 	getReq := httptest.NewRequest("GET", "/api/config", nil)
 	getW := httptest.NewRecorder()
 	s.handleConfig(getW, getReq)
@@ -116,8 +116,68 @@ func TestServerConfigAPI(t *testing.T) {
 		t.Errorf("Expected wg0, got %s", currentCfg.Tunnels[0].Interface)
 	}
 
-	if sup == nil {
-		t.Fatalf("Expected supervisor instance")
+	// 2. GET /api/config?raw=true (raw YAML string)
+	rawReq := httptest.NewRequest("GET", "/api/config?raw=true", nil)
+	rawW := httptest.NewRecorder()
+	s.handleConfig(rawW, rawReq)
+	if rawW.Code != http.StatusOK {
+		t.Fatalf("GET /api/config?raw=true code %d", rawW.Code)
+	}
+	rawContent := rawW.Body.String()
+	if !strings.Contains(rawContent, "interface: wg0") && !strings.Contains(rawContent, "interface: \"wg0\"") {
+		t.Errorf("raw YAML does not contain interface wg0: %s", rawContent)
+	}
+
+	// 3. POST /api/config with updated raw YAML
+	newYAML := `mode: "server"
+tunnels:
+  - interface: "wg0"
+    name: "Client-1-Renamed"
+    port_range: "20000-29999"
+    remote_port_range: "20000-29999"
+    history_file: "off"
+`
+	postReq := httptest.NewRequest("POST", "/api/config", strings.NewReader(newYAML))
+	postReq.Header.Set("Content-Type", "text/yaml")
+	postW := httptest.NewRecorder()
+	s.handleConfig(postW, postReq)
+	if postW.Code != http.StatusOK {
+		t.Fatalf("POST /api/config code %d: %s", postW.Code, postW.Body.String())
+	}
+
+	// Verify in-memory config and supervisor status were updated
+	st := sup.GetStatus()
+	if st.Tunnels["wg0"].Name != "Client-1-Renamed" {
+		t.Errorf("expected updated tunnel name in supervisor, got %s", st.Tunnels["wg0"].Name)
+	}
+
+	// 4. POST /api/config with invalid YAML (syntax error)
+	badReq := httptest.NewRequest("POST", "/api/config", strings.NewReader("invalid: [yaml"))
+	badReq.Header.Set("Content-Type", "text/yaml")
+	badW := httptest.NewRecorder()
+	s.handleConfig(badW, badReq)
+	if badW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for bad YAML, got %d", badW.Code)
+	}
+
+	// 5. POST /api/config with port range overlap
+	overlapYAML := `mode: "server"
+tunnels:
+  - interface: "wg0"
+    port_range: "20000-25000"
+    iptables: true
+    history_file: "off"
+  - interface: "wg1"
+    port_range: "24000-26000"
+    iptables: true
+    history_file: "off"
+`
+	overlapReq := httptest.NewRequest("POST", "/api/config", strings.NewReader(overlapYAML))
+	overlapReq.Header.Set("Content-Type", "text/yaml")
+	overlapW := httptest.NewRecorder()
+	s.handleConfig(overlapW, overlapReq)
+	if overlapW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for port overlap, got %d", overlapW.Code)
 	}
 }
 

@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"io"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -158,3 +159,131 @@ func TestSupervisorClientFailoverFlow(t *testing.T) {
 		t.Errorf("expected ActiveTunnel wgBridge1, got %s", st.ActiveTunnel)
 	}
 }
+
+func TestSupervisorSaveAndApplyConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgFile := tmpDir + "/config.yaml"
+
+	initialYAML := `mode: "server"
+tunnels:
+  - interface: "wg0"
+    name: "Initial-Tunnel"
+    port_range: "20000-24999"
+    remote_port_range: "20000-24999"
+    history_file: "off"
+`
+	if err := os.WriteFile(cfgFile, []byte(initialYAML), 0600); err != nil {
+		t.Fatalf("setup initial config file: %v", err)
+	}
+
+	log := logger.New(io.Discard, logger.LevelDebug, 100)
+	wgCtrl, _ := wg.NewController(log)
+	iptMgr := iptables.NewManager(log)
+
+	cfg, err := config.LoadConfig(cfgFile)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	sup := New(cfgFile, cfg, wgCtrl, iptMgr, log)
+
+	// 1. Verify GetConfigPath and GetRawConfigFile
+	if sup.GetConfigPath() != cfgFile {
+		t.Errorf("expected path %s, got %s", cfgFile, sup.GetConfigPath())
+	}
+	raw, err := sup.GetRawConfigFile()
+	if err != nil || len(raw) == 0 {
+		t.Fatalf("failed to read raw config: %v", err)
+	}
+
+	// 2. Test saving invalid YAML (syntax error)
+	_, err = sup.SaveAndApplyConfig("mode: server\ntunnels: [")
+	if err == nil {
+		t.Errorf("expected error for invalid YAML syntax, got nil")
+	}
+
+	// 3. Test saving invalid configuration (port range overlap)
+	invalidOverlap := `mode: "server"
+tunnels:
+  - interface: "wg0"
+    port_range: "20000-25000"
+    iptables: true
+    history_file: "off"
+  - interface: "wg1"
+    port_range: "24000-26000"
+    iptables: true
+    history_file: "off"
+`
+	_, err = sup.SaveAndApplyConfig(invalidOverlap)
+	if err == nil {
+		t.Errorf("expected validation error for port range overlap, got nil")
+	}
+
+	// 4. Test saving valid configuration that adds a tunnel and updates existing
+	validNew := `mode: "server"
+tunnels:
+  - interface: "wg0"
+    name: "Updated-Tunnel-0"
+    port_range: "20000-24000"
+    remote_port_range: "20000-24000"
+    history_file: "off"
+  - interface: "wg1"
+    name: "New-Tunnel-1"
+    port_range: "25000-29000"
+    remote_port_range: "25000-29000"
+    history_file: "off"
+`
+	applied, err := sup.SaveAndApplyConfig(validNew)
+	if err != nil {
+		t.Fatalf("SaveAndApplyConfig failed: %v", err)
+	}
+	if len(applied.Tunnels) != 2 {
+		t.Fatalf("expected 2 applied tunnels, got %d", len(applied.Tunnels))
+	}
+
+	// Check status in supervisor
+	st := sup.GetStatus()
+	if len(st.Tunnels) != 2 {
+		t.Fatalf("expected 2 active tunnels in supervisor, got %d", len(st.Tunnels))
+	}
+	if st.Tunnels["wg0"].Name != "Updated-Tunnel-0" {
+		t.Errorf("expected updated name for wg0, got %s", st.Tunnels["wg0"].Name)
+	}
+	if st.Tunnels["wg1"].Name != "New-Tunnel-1" {
+		t.Errorf("expected name New-Tunnel-1 for wg1, got %s", st.Tunnels["wg1"].Name)
+	}
+
+	// 5. Verify the file on disk was atomically updated
+	rawDisk, err := sup.GetRawConfigFile()
+	if err != nil {
+		t.Fatalf("read raw disk config: %v", err)
+	}
+	if rawDisk != validNew {
+		t.Errorf("disk content mismatch:\ngot:\n%s\nwant:\n%s", rawDisk, validNew)
+	}
+
+	// 6. Test removing a tunnel
+	validRemoved := `mode: "server"
+tunnels:
+  - interface: "wg1"
+    name: "Only-Tunnel-1"
+    port_range: "25000-29000"
+    remote_port_range: "25000-29000"
+    history_file: "off"
+`
+	applied2, err := sup.SaveAndApplyConfig(validRemoved)
+	if err != nil {
+		t.Fatalf("SaveAndApplyConfig remove failed: %v", err)
+	}
+	if len(applied2.Tunnels) != 1 {
+		t.Fatalf("expected 1 applied tunnel, got %d", len(applied2.Tunnels))
+	}
+	st2 := sup.GetStatus()
+	if len(st2.Tunnels) != 1 {
+		t.Errorf("expected 1 tunnel in supervisor after removal, got %d", len(st2.Tunnels))
+	}
+	if _, exists := st2.Tunnels["wg0"]; exists {
+		t.Errorf("expected wg0 to be removed, but still present in status")
+	}
+}
+

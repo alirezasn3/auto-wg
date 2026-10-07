@@ -21,6 +21,7 @@
         <nav class="nav-tabs">
           <button class="nav-tab active" data-tab="dashboard">Dashboard</button>
           <button class="nav-tab" data-tab="logs">Live Logs</button>
+          <button class="nav-tab" data-tab="config">Configuration</button>
         </nav>
         <div class="time-badge" id="serverClock">--:--:--</div>
       </div>
@@ -313,8 +314,104 @@
         </div>
       </section>
     </main>
+
+    <!-- TAB 3: CONFIGURATION EDITOR -->
+    <main id="tab-config" class="tab-content">
+      <section class="card config-editor-card">
+        <div class="config-header">
+          <div class="config-title-group">
+            <div class="config-title-row">
+              <span class="section-tag">LIVE CONFIGURATION</span>
+              <div class="config-sync-row">
+                <h2>Startup Config File</h2>
+                <span id="configSyncBadge" class="config-sync-pill sync-ok">Synced with Disk</span>
+              </div>
+            </div>
+            <div class="config-path-box">
+              <span class="config-path-label">Path:</span>
+              <code id="configFilePath" class="config-path-value">Loading...</code>
+              <button class="btn-copy" id="btnCopyConfigPath" title="Copy Path">📋</button>
+            </div>
+          </div>
+          <div class="config-actions">
+            <button id="btnReloadConfig" class="btn btn-secondary btn-sm" title="Discard unsaved changes and reload from disk">
+              ↻ Reload from Disk
+            </button>
+            <button id="btnSaveConfig" class="btn btn-primary btn-sm" title="Validate, save to startup config file, and apply live">
+              💾 Save & Apply
+            </button>
+          </div>
+        </div>
+
+        <div id="configAlert" class="config-alert hidden"></div>
+
+        <div class="editor-wrapper">
+          <div class="editor-toolbar">
+            <div class="editor-toolbar-left">
+              <span class="editor-tag">YAML</span>
+              <span class="editor-hint">Press <kbd>Tab</kbd> to indent with 2 spaces. Validated before writing to disk.</span>
+            </div>
+            <div class="editor-toolbar-right">
+              <span id="editorLineCount" class="editor-meta">0 lines</span>
+            </div>
+          </div>
+          <textarea id="configYamlEditor" class="config-yaml-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" placeholder="Loading configuration from disk..."></textarea>
+        </div>
+      </section>
+
+      <!-- Configuration Reference & Snippets Card -->
+      <section class="card config-help-card">
+        <div class="section-header">
+          <div class="logs-title-group">
+            <h3>Configuration Guide & Quick Examples</h3>
+          </div>
+          <button id="btnToggleHelp" class="btn btn-secondary btn-sm">Toggle Tips</button>
+        </div>
+        <div id="configHelpContent" class="config-help-body">
+          <div class="help-grid">
+            <div class="help-box">
+              <h4>🌐 Multi-Destination Candidate IPs (IPv4 + IPv6)</h4>
+              <p>Configure multiple candidate endpoints under <code>target_ips</code>. Auto-WG will hunt across both v4 and v6:</p>
+              <pre><code>tunnels:
+  - interface: "wgBridge0"
+    target_ips:
+      - "198.51.100.1"
+      - "2001:db8::1"
+      - "vps.example.com"</code></pre>
+            </div>
+            <div class="help-box">
+              <h4>🔀 Policy Routing & Failover (Table 200)</h4>
+              <p>Automatically manage default route failover across multiple upstream links in client mode:</p>
+              <pre><code>mode: "client"
+routing:
+  enabled: true
+  table: 200
+  mode: "priority" # "priority" or "sticky"
+  metric: 100</code></pre>
+            </div>
+            <div class="help-box">
+              <h4>📡 In-Tunnel Health Check (Fast Ping)</h4>
+              <p>Detect DPI packet dropping within 5-10 seconds via ICMP before the WireGuard handshake timer expires:</p>
+              <pre><code>    tunnel_ping:
+      enabled: true
+      target_ip: "10.100.0.1"
+      interval: 2s
+      failure_threshold: 3</code></pre>
+            </div>
+            <div class="help-box">
+              <h4>🛡️ Passive Peer Mode (MikroTik / Static)</h4>
+              <p>For remote peers that don't run Auto-WG, set <code>hunting: false</code> to monitor without rotating ports:</p>
+              <pre><code>    hunting: false # Passive monitoring only
+    port_range: "20000-30000"
+    iptables: true</code></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
   </div>
 
   <script src="app.js"></script>
 </body>
 </html>
+

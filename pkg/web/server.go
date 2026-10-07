@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"math"
 	"net"
@@ -14,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"auto-wg/pkg/config"
 	"auto-wg/pkg/hunter"
@@ -291,33 +294,120 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		// Check if raw YAML was requested directly
+		if r.URL.Query().Get("raw") == "true" || strings.Contains(r.Header.Get("Accept"), "text/yaml") {
+			rawYml, err := s.sup.GetRawConfigFile()
+			if err != nil {
+				http.Error(w, fmt.Sprintf("failed to read config file: %v", err), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
+			_, _ = w.Write([]byte(rawYml))
+			return
+		}
+
+		// Default GET: return JSON payload with file path, raw YAML, and parsed configuration
 		cfg := s.sup.GetConfig()
 		cfgCopy := cfg
 		if cfgCopy.Web.Password != "" {
 			cfgCopy.Web.Password = "********"
 		}
+
+		rawYml, err := s.sup.GetRawConfigFile()
+		if err != nil {
+			s.log.Warn("WEB", "Could not read raw config file: %v", err)
+			if yBytes, mErr := yaml.Marshal(&cfgCopy); mErr == nil {
+				rawYml = string(yBytes)
+			}
+		}
+
+		type ConfigResponse struct {
+			config.Config
+			Path   string        `json:"path"`
+			YAML   string        `json:"yaml"`
+			Parsed config.Config `json:"config"`
+		}
+
+		resp := ConfigResponse{
+			Config: cfgCopy,
+			Path:   s.sup.GetConfigPath(),
+			YAML:   rawYml,
+			Parsed: cfgCopy,
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(cfgCopy)
+		_ = json.NewEncoder(w).Encode(resp)
 
 	case http.MethodPost:
-		var newCfg config.Config
-		if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
-			http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("read request body: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		current := s.sup.GetConfig()
-		if newCfg.Web.Password == "********" || newCfg.Web.Password == "" {
-			newCfg.Web.Password = current.Web.Password
+		rawYAML := ""
+		contentType := r.Header.Get("Content-Type")
+
+		if strings.Contains(contentType, "application/json") {
+			var jsonMap map[string]json.RawMessage
+			if err := json.Unmarshal(bodyBytes, &jsonMap); err == nil {
+				if yVal, ok := jsonMap["yaml"]; ok {
+					var str string
+					if err := json.Unmarshal(yVal, &str); err == nil {
+						rawYAML = str
+					}
+				}
+			}
+
+			if rawYAML == "" {
+				var newCfg config.Config
+				if err := json.Unmarshal(bodyBytes, &newCfg); err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": fmt.Sprintf("invalid json payload: %v", err)})
+					return
+				}
+				current := s.sup.GetConfig()
+				if newCfg.Web.Password == "********" || newCfg.Web.Password == "" {
+					newCfg.Web.Password = current.Web.Password
+				}
+				ymlBytes, mErr := yaml.Marshal(&newCfg)
+				if mErr != nil {
+					http.Error(w, fmt.Sprintf("marshal to yaml: %v", mErr), http.StatusInternalServerError)
+					return
+				}
+				rawYAML = string(ymlBytes)
+			}
+		} else {
+			rawYAML = string(bodyBytes)
 		}
 
-		if err := config.Validate(&newCfg); err != nil {
-			http.Error(w, fmt.Sprintf("invalid config: %v", err), http.StatusBadRequest)
+		if strings.TrimSpace(rawYAML) == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "empty configuration payload"})
+			return
+		}
+
+		appliedCfg, err := s.sup.SaveAndApplyConfig(rawYAML)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "error",
+				"error":  err.Error(),
+			})
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "config received"})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "ok",
+			"message": "Configuration saved to disk and applied live",
+			"path":    s.sup.GetConfigPath(),
+			"tunnels": len(appliedCfg.Tunnels),
+			"mode":    appliedCfg.Mode,
+		})
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

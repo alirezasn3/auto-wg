@@ -1004,3 +1004,88 @@ func (h *Hunter) GetState() string {
 	defer h.mu.RUnlock()
 	return h.state
 }
+
+// UpdateConfig dynamically updates the tunnel configuration in memory without tearing down active handshakes.
+func (h *Hunter) UpdateConfig(newCfg config.TunnelConfig) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.cfg.Name = newCfg.Name
+	if newCfg.CheckInterval > 0 {
+		h.cfg.CheckInterval = newCfg.CheckInterval
+	}
+	if newCfg.HandshakeTimeout > 0 {
+		h.cfg.HandshakeTimeout = newCfg.HandshakeTimeout
+	}
+	if newCfg.CycleTimeout > 0 {
+		h.cfg.CycleTimeout = newCfg.CycleTimeout
+	}
+	if newCfg.PortRange != "" {
+		h.cfg.PortRange = newCfg.PortRange
+	}
+	if newCfg.RemotePortRange != "" {
+		h.cfg.RemotePortRange = newCfg.RemotePortRange
+	}
+	if newCfg.PeerPublicKey != "" {
+		h.cfg.PeerPublicKey = newCfg.PeerPublicKey
+		h.peerPubKey = newCfg.PeerPublicKey
+	}
+
+	if newCfg.Hunting != nil {
+		h.huntingEnabled = *newCfg.Hunting
+		h.cfg.Hunting = newCfg.Hunting
+	} else if newCfg.Passive {
+		h.huntingEnabled = false
+		h.cfg.Passive = true
+	} else {
+		h.huntingEnabled = true
+	}
+
+	h.cfg.TunnelPing = newCfg.TunnelPing
+	h.pingTarget = strings.TrimSpace(newCfg.TunnelPing.TargetIP)
+	h.cfg.Iptables = newCfg.Iptables
+
+	// Update target IPs / hostnames
+	var rawTargets []string
+	for _, ip := range newCfg.TargetIPs {
+		ip = strings.TrimSpace(ip)
+		if ip != "" {
+			rawTargets = append(rawTargets, ip)
+		}
+	}
+	if newCfg.TargetIP != "" {
+		ip := strings.TrimSpace(newCfg.TargetIP)
+		if ip != "" {
+			rawTargets = append(rawTargets, ip)
+		}
+	}
+	h.configuredTargets = rawTargets
+	resolved := config.ResolveTargetIPs(rawTargets)
+	if len(resolved) > 0 {
+		h.targetIPs = resolved
+		found := false
+		for _, tip := range resolved {
+			if tip == h.targetIP {
+				found = true
+				break
+			}
+		}
+		if !found {
+			h.targetIP = resolved[0]
+			h.targetIPIndex = 0
+		}
+	}
+
+	// Update iptables rules if needed
+	if h.cfg.Iptables && h.iptMgr != nil && h.localPort > 0 {
+		_ = h.iptMgr.ApplyForwardingRule(h.cfg.Interface, h.cfg.PortRange, h.localPort)
+		h.iptablesActive = true
+	} else if !h.cfg.Iptables && h.iptMgr != nil {
+		_ = h.iptMgr.RemoveRule(h.cfg.Interface)
+		h.iptablesActive = false
+	}
+
+	h.log.Info("HUNTER", "[%s] Config updated live: hunting=%v, port_range=%s, targets=%v",
+		h.cfg.Interface, h.huntingEnabled, h.cfg.PortRange, h.targetIPs)
+}
+
