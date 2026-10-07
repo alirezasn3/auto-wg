@@ -316,6 +316,38 @@ func TestInitializeInterfaceWithoutListenPortOrEndpoint(t *testing.T) {
 	}
 }
 
+func TestDomainTargetResolutionOnHunt(t *testing.T) {
+	log := logger.New(io.Discard, logger.LevelDebug, 100)
+	wgCtrl, _ := wg.NewController(log)
+	iptMgr := iptables.NewManager(log)
+
+	tunnelCfg := config.TunnelConfig{
+		Interface:       "wg0",
+		TargetIPs:       []string{"localhost"},
+		PortRange:       "20000-24999",
+		RemotePortRange: "25000-29999",
+		HistoryFile:     "off",
+	}
+
+	h := New(tunnelCfg, wgCtrl, iptMgr, log, nil)
+
+	st0 := h.GetStatus()
+	if st0.TargetIP != "127.0.0.1" && st0.TargetIP != "::1" {
+		t.Errorf("expected localhost to resolve to 127.0.0.1 or ::1, got %s", st0.TargetIP)
+	}
+
+	// Execute hunt should re-resolve domain names on every try
+	h.executeHunt("dns_test")
+	st1 := h.GetStatus()
+	if st1.TargetIP != "127.0.0.1" && st1.TargetIP != "::1" {
+		t.Errorf("expected localhost to re-resolve to 127.0.0.1 or ::1, got %s", st1.TargetIP)
+	}
+	if st1.TotalHunts != 1 {
+		t.Errorf("expected 1 hunt, got %d", st1.TotalHunts)
+	}
+}
+
+
 
 
 

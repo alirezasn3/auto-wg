@@ -754,6 +754,21 @@ func (h *Hunter) determineDirection(currentRemotePort int) (string, string) {
 }
 
 func (h *Hunter) executeHunt(reason string) {
+	h.mu.RLock()
+	configuredTargets := make([]string, len(h.configuredTargets))
+	copy(configuredTargets, h.configuredTargets)
+	h.mu.RUnlock()
+
+	// If domain names/hostnames are configured, re-resolve them on every hunt attempt!
+	if config.HasHostnames(configuredTargets) {
+		freshIPs := config.ResolveTargetIPs(configuredTargets)
+		if len(freshIPs) > 0 {
+			h.mu.Lock()
+			h.targetIPs = freshIPs
+			h.mu.Unlock()
+		}
+	}
+
 	h.mu.Lock()
 	iface := h.cfg.Interface
 	localRange := h.cfg.PortRange

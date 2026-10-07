@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"math/big"
@@ -279,9 +280,29 @@ func PickRandomPort(rangeSpec string) (int, error) {
 	return start + int(n.Int64()), nil
 }
 
+// HasHostnames checks if any entry in the target list is a non-IP domain name or hostname.
+func HasHostnames(entries []string) bool {
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		clean := strings.TrimPrefix(strings.TrimSuffix(entry, "]"), "[")
+		if net.ParseIP(clean) == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // ResolveTargetIPs resolves a list of target IPs and/or hostnames into deduplicated,
 // canonical IP address strings (both IPv4 and IPv6).
 func ResolveTargetIPs(entries []string) []string {
+	return ResolveTargetIPsContext(context.Background(), entries)
+}
+
+// ResolveTargetIPsContext resolves target IPs/hostnames with a context for DNS queries.
+func ResolveTargetIPsContext(ctx context.Context, entries []string) []string {
 	var results []string
 	seen := make(map[string]bool)
 
@@ -307,7 +328,10 @@ func ResolveTargetIPs(entries []string) []string {
 		}
 
 		// Not an IP address, attempt DNS lookup for both A (IPv4) and AAAA (IPv6) records
-		ips, err := net.LookupIP(clean)
+		lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		ips, err := net.DefaultResolver.LookupIP(lookupCtx, "ip", clean)
+		cancel()
+
 		if err == nil && len(ips) > 0 {
 			for _, ip := range ips {
 				var canon string

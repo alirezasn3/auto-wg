@@ -216,4 +216,20 @@ func TestPassiveTunnelConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestHasHostnames(t *testing.T) {
+	if HasHostnames([]string{"198.51.100.1", "2001:db8::1"}) {
+		t.Errorf("expected false for static IP list")
+	}
+	if !HasHostnames([]string{"198.51.100.1", "vpn.example.com"}) {
+		t.Errorf("expected true when list contains domain name")
+	}
+	if !HasHostnames([]string{"localhost"}) {
+		t.Errorf("expected true for localhost")
+	}
+	if HasHostnames([]string{"[2001:db8::1]"}) {
+		t.Errorf("expected false for bracketed IPv6")
+	}
+}
+
+
 
