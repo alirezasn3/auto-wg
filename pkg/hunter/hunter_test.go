@@ -291,5 +291,31 @@ func TestPassiveTunnelNoHunting(t *testing.T) {
 	}
 }
 
+func TestInitializeInterfaceWithoutListenPortOrEndpoint(t *testing.T) {
+	log := logger.New(io.Discard, logger.LevelDebug, 100)
+	wgCtrl, _ := wg.NewController(log)
+	iptMgr := iptables.NewManager(log)
+
+	tunnelCfg := config.TunnelConfig{
+		Interface:       "wg0",
+		TargetIPs:       []string{"198.51.100.1", "2001:db8::1"},
+		PortRange:       "20000-24999",
+		RemotePortRange: "25000-29999",
+		HistoryFile:     "off",
+	}
+
+	h := New(tunnelCfg, wgCtrl, iptMgr, log, nil)
+
+	// initializeInterface should run safely even if interface does not have ListenPort or Endpoint
+	h.initializeInterface()
+	h.applyIptablesRule()
+
+	st := h.GetStatus()
+	if st.TargetIP != "198.51.100.1" {
+		t.Errorf("expected TargetIP 198.51.100.1, got %s", st.TargetIP)
+	}
+}
+
+
 
 

@@ -1,6 +1,9 @@
 # ==============================================================================
 # Auto-WG Client Configuration (Upstream Failover & Routing Table 200)
 # ==============================================================================
+# NOTE: Your /etc/wireguard/wgBridge*.conf interface files do NOT need "ListenPort" or "Endpoint".
+# Auto-WG automatically assigns a listen port from "port_range" and initializes the
+# peer's remote endpoint from "target_ips" and "remote_port_range" on startup!
 
 # Operation mode: "client" (one of multiple upstream connections is chosen based on availability)
 mode: "client"

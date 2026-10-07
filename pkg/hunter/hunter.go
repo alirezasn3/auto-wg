@@ -349,10 +349,13 @@ func (h *Hunter) Start(ctx context.Context) {
 		_ = h.SaveHistory()
 	}()
 
-	// Apply iptables rule if enabled
+	// 1. Initialize WireGuard listen port and peer endpoint from config if unset in interface config
+	h.initializeInterface()
+
+	// 2. Apply iptables rule if enabled
 	h.applyIptablesRule()
 
-	// Save initial history state so the file exists on disk immediately
+	// 3. Save initial history state so the file exists on disk immediately
 	_ = h.SaveHistory()
 
 	ticker := time.NewTicker(h.cfg.CheckInterval)
@@ -374,11 +377,97 @@ func (h *Hunter) Start(ctx context.Context) {
 	}
 }
 
+func (h *Hunter) initializeInterface() {
+	h.mu.RLock()
+	iface := h.cfg.Interface
+	localRange := h.cfg.PortRange
+	remoteRange := h.cfg.RemotePortRange
+	peerKey := h.cfg.PeerPublicKey
+	targetIP := h.targetIP
+	h.mu.RUnlock()
+
+	if h.wgCtrl == nil {
+		return
+	}
+
+	dev, err := h.wgCtrl.GetDeviceInfo(iface, peerKey)
+	if err != nil {
+		h.log.Debug("HUNTER", "[%s] Cannot query interface on startup initialize: %v", iface, err)
+		return
+	}
+
+	h.mu.Lock()
+	if dev.PublicKey != "" {
+		h.localPubKey = dev.PublicKey
+	}
+	if dev.PeerPublicKey != "" {
+		h.peerPubKey = dev.PeerPublicKey
+		peerKey = dev.PeerPublicKey
+	}
+	h.mu.Unlock()
+
+	// 1. Ensure local listen port is within configured port_range
+	start, end, errRange := config.ParsePortRange(localRange)
+	needsNewListenPort := false
+	if errRange == nil {
+		if dev.ListenPort < start || dev.ListenPort > end {
+			needsNewListenPort = true
+		}
+	}
+	if needsNewListenPort && localRange != "" {
+		newPort, err := config.PickRandomPort(localRange)
+		if err == nil {
+			if err := h.wgCtrl.UpdateListenPort(iface, newPort); err == nil {
+				h.mu.Lock()
+				h.localPort = newPort
+				h.mu.Unlock()
+				h.log.Info("HUNTER", "[%s] Auto-assigned WireGuard listen port to :%d (from port_range %s)", iface, newPort, localRange)
+			} else {
+				h.log.Warn("HUNTER", "[%s] Failed to set initial listen port :%d: %v", iface, newPort, err)
+			}
+		}
+	} else if dev.ListenPort > 0 {
+		h.mu.Lock()
+		h.localPort = dev.ListenPort
+		h.mu.Unlock()
+	}
+
+	// 2. If WireGuard peer has no endpoint configured, but target_ip(s) is known, auto-assign initial endpoint!
+	if dev.PeerEndpoint == "" && peerKey != "" && targetIP != "" && remoteRange != "" {
+		initialRemotePort, err := config.PickRandomPort(remoteRange)
+		if err == nil {
+			initialEndpoint := net.JoinHostPort(targetIP, strconv.Itoa(initialRemotePort))
+			if err := h.wgCtrl.UpdatePeerEndpoint(iface, peerKey, initialEndpoint); err == nil {
+				h.mu.Lock()
+				h.remotePort = initialRemotePort
+				h.lastDialedRemotePort = initialRemotePort
+				h.lastDialedAt = time.Now()
+				localP := h.localPort
+				h.mu.Unlock()
+				h.log.Info("HUNTER", "[%s] Auto-assigned peer endpoint to %s (from target_ips and remote_port_range %s)",
+					iface, initialEndpoint, remoteRange)
+
+				// Send initial probe
+				if localP > 0 {
+					go h.sendProbePacket(localP, targetIP, initialRemotePort)
+				}
+			} else {
+				h.log.Warn("HUNTER", "[%s] Failed to set initial peer endpoint %s: %v", iface, initialEndpoint, err)
+			}
+		}
+	} else if dev.PeerPort > 0 {
+		h.mu.Lock()
+		h.remotePort = dev.PeerPort
+		h.mu.Unlock()
+	}
+}
+
 func (h *Hunter) applyIptablesRule() {
 	h.mu.Lock()
 	enabled := h.cfg.Iptables
 	portRange := h.cfg.PortRange
 	iface := h.cfg.Interface
+	localPort := h.localPort
 	h.mu.Unlock()
 
 	if !enabled {
@@ -387,10 +476,15 @@ func (h *Hunter) applyIptablesRule() {
 	}
 
 	// Read current WireGuard listen port
-	dev, err := h.wgCtrl.GetDeviceInfo(iface, "")
 	targetPort := 51820
-	if err == nil && dev.ListenPort > 0 {
-		targetPort = dev.ListenPort
+	if localPort > 0 {
+		targetPort = localPort
+	}
+	if h.wgCtrl != nil {
+		dev, err := h.wgCtrl.GetDeviceInfo(iface, "")
+		if err == nil && dev.ListenPort > 0 {
+			targetPort = dev.ListenPort
+		}
 	}
 
 	if err := h.iptMgr.ApplyForwardingRule(iface, portRange, targetPort); err != nil {

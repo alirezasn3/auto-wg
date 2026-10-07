@@ -1,6 +1,9 @@
 # ==============================================================================
 # Auto-WG Server Configuration (One Server -> Multiple Clients)
 # ==============================================================================
+# NOTE: Your /etc/wireguard/wg*.conf interface files do NOT need "ListenPort" or "Endpoint".
+# Auto-WG automatically assigns a listen port from "port_range" and initializes the
+# peer's remote endpoint from "target_ips" and "remote_port_range" on startup!
 
 # Operation mode: "server" (maintains connections to one or more clients)
 mode: "server"
