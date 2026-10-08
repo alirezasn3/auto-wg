@@ -105,7 +105,11 @@ func main() {
 	}
 
 	// Start Supervisor in background (manages hunters, PostUp/PreDown, and routing failover)
-	go sup.Start(ctx)
+	supDone := make(chan struct{})
+	go func() {
+		defer close(supDone)
+		sup.Start(ctx)
+	}()
 
 	// Handle graceful shutdown on OS signals
 	sigChan := make(chan os.Signal, 1)
@@ -122,6 +126,7 @@ func main() {
 		_ = webServer.Stop(shutdownCtx)
 	}
 
+	<-supDone
 	fmt.Println("Auto-WG stopped cleanly.")
 }
 
@@ -146,7 +151,7 @@ func handleInstall(configPath string, log *logger.Logger) {
 	svc := &goSystemd.Service{
 		Name:        "autowg",
 		Description: "Auto-WG: Autonomous WireGuard Port Negotiator",
-		ExecStart:   fmt.Sprintf("%s -config %s", exePath, absConfigPath),
+		ExecStart:   fmt.Sprintf("%q -config %q", exePath, absConfigPath),
 		Restart:     "always",
 		RestartSec:  "5s",
 		After:       "network.target",
