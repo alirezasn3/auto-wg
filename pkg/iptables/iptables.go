@@ -107,13 +107,17 @@ func (m *Manager) ApplyForwardingRule(iface string, portRangeSpec string, target
 	// 1. IPv4 (iptables)
 	if m.ipt4 != nil {
 		exists, err := m.ipt4.Exists("nat", "PREROUTING", ruleSpec...)
-		if err == nil && !exists {
+		if err != nil {
+			m.log.Warn("IPTABLES", "[%s] Failed to check IPv4 PREROUTING rule: %v", iface, err)
+			return fmt.Errorf("ipv4 PREROUTING exists check: %w", err)
+		}
+		if !exists {
 			if err := m.ipt4.AppendUnique("nat", "PREROUTING", ruleSpec...); err != nil {
 				m.log.Warn("IPTABLES", "[%s] Failed to append IPv4 rule: %v", iface, err)
-			} else {
-				m.log.Info("IPTABLES", "[%s] Applied IPv4 NAT REDIRECT: UDP dport %s -> WireGuard port %d", iface, dport, targetPort)
+				return fmt.Errorf("ipv4 PREROUTING append: %w", err)
 			}
-		} else if exists {
+			m.log.Info("IPTABLES", "[%s] Applied IPv4 NAT REDIRECT: UDP dport %s -> WireGuard port %d", iface, dport, targetPort)
+		} else {
 			m.log.Info("IPTABLES", "[%s] IPv4 forwarding rule already active: UDP %s -> WireGuard port %d", iface, dport, targetPort)
 		}
 	}
