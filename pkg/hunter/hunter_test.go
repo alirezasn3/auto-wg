@@ -347,6 +347,48 @@ func TestDomainTargetResolutionOnHunt(t *testing.T) {
 	}
 }
 
+func TestUpdateConfigTargetIPs(t *testing.T) {
+	log := logger.New(io.Discard, logger.LevelDebug, 100)
+	wgCtrl, _ := wg.NewController(log)
+	iptMgr := iptables.NewManager(log)
+
+	tunnelCfg := config.TunnelConfig{
+		Interface:       "wg0",
+		TargetIPs:       []string{"198.51.100.1"},
+		PortRange:       "20000-24999",
+		RemotePortRange: "25000-29999",
+		HistoryFile:     "off",
+	}
+
+	h := New(tunnelCfg, wgCtrl, iptMgr, log, nil)
+	st0 := h.GetStatus()
+	if st0.TargetIP != "198.51.100.1" {
+		t.Fatalf("expected initial TargetIP 198.51.100.1, got %s", st0.TargetIP)
+	}
+	if len(st0.TargetIPs) != 1 || st0.TargetIPs[0] != "198.51.100.1" {
+		t.Fatalf("expected initial TargetIPs [198.51.100.1], got %v", st0.TargetIPs)
+	}
+
+	// Update to a new single target IP
+	updatedCfg := config.TunnelConfig{
+		Interface:       "wg0",
+		TargetIPs:       []string{"203.0.113.50"},
+		PortRange:       "20000-24999",
+		RemotePortRange: "25000-29999",
+		HistoryFile:     "off",
+	}
+	h.UpdateConfig(updatedCfg)
+
+	st1 := h.GetStatus()
+	if st1.TargetIP != "203.0.113.50" {
+		t.Errorf("expected updated TargetIP 203.0.113.50, got %s", st1.TargetIP)
+	}
+	if len(st1.TargetIPs) != 1 || st1.TargetIPs[0] != "203.0.113.50" {
+		t.Errorf("expected updated TargetIPs [203.0.113.50], got %v", st1.TargetIPs)
+	}
+}
+
+
 
 
 

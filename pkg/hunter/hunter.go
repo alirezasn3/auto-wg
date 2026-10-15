@@ -432,8 +432,22 @@ func (h *Hunter) initializeInterface() {
 		h.mu.Unlock()
 	}
 
-	// 2. If WireGuard peer has no endpoint configured, but target_ip(s) is known, auto-assign initial endpoint!
-	if dev.PeerEndpoint == "" && peerKey != "" && targetIP != "" && remoteRange != "" {
+	// 2. If WireGuard peer has no endpoint configured (or has an unconfigured stale endpoint with no active handshake), auto-assign initial endpoint!
+	endpointNeedsInit := dev.PeerEndpoint == ""
+	if !endpointNeedsInit && len(h.targetIPs) > 0 && dev.PeerEndpointIP != "" {
+		cleanDevIP := strings.Trim(dev.PeerEndpointIP, "[]")
+		match := false
+		for _, tip := range h.targetIPs {
+			if tip == cleanDevIP {
+				match = true
+				break
+			}
+		}
+		if !match && (dev.LastHandshake.IsZero() || dev.HandshakeAge > h.cfg.HandshakeTimeout) {
+			endpointNeedsInit = true
+		}
+	}
+	if endpointNeedsInit && peerKey != "" && targetIP != "" && remoteRange != "" {
 		initialRemotePort, err := config.PickRandomPort(remoteRange)
 		if err == nil {
 			initialEndpoint := net.JoinHostPort(targetIP, strconv.Itoa(initialRemotePort))
@@ -536,19 +550,24 @@ func (h *Hunter) tick(ctx context.Context) {
 
 	if dev.PeerEndpointIP != "" {
 		cleanDevIP := strings.Trim(dev.PeerEndpointIP, "[]")
-		h.targetIP = cleanDevIP
-		// Find cleanDevIP in targetIPs and update targetIPIndex
 		found := false
 		for idx, tip := range h.targetIPs {
 			if tip == cleanDevIP {
 				found = true
 				h.targetIPIndex = idx
+				h.targetIP = cleanDevIP
 				break
 			}
 		}
 		if !found && cleanDevIP != "" {
-			h.targetIPs = append(h.targetIPs, cleanDevIP)
-			h.targetIPIndex = len(h.targetIPs) - 1
+			if len(h.configuredTargets) == 0 {
+				h.targetIP = cleanDevIP
+				h.targetIPs = []string{cleanDevIP}
+				h.targetIPIndex = 0
+			} else if !dev.LastHandshake.IsZero() && dev.HandshakeAge <= timeout {
+				// Handshake is active and healthy: WireGuard roamed to peer's actual NAT/egress IP
+				h.targetIP = cleanDevIP
+			}
 		}
 	} else if h.targetIP == "" && len(h.targetIPs) > 0 {
 		h.targetIP = h.targetIPs[0]
@@ -1063,16 +1082,37 @@ func (h *Hunter) UpdateConfig(newCfg config.TunnelConfig) {
 	resolved := config.ResolveTargetIPs(rawTargets)
 	if len(resolved) > 0 {
 		h.targetIPs = resolved
+		targetChanged := false
 		found := false
-		for _, tip := range resolved {
+		for idx, tip := range resolved {
 			if tip == h.targetIP {
 				found = true
+				h.targetIPIndex = idx
 				break
 			}
 		}
 		if !found {
 			h.targetIP = resolved[0]
 			h.targetIPIndex = 0
+			targetChanged = true
+		}
+
+		if targetChanged && h.peerPubKey != "" && h.targetIP != "" {
+			port := h.remotePort
+			if port <= 0 && h.cfg.RemotePortRange != "" {
+				port, _ = config.PickRandomPort(h.cfg.RemotePortRange)
+			}
+			if port > 0 {
+				h.remotePort = port
+				newEndpoint := net.JoinHostPort(h.targetIP, strconv.Itoa(port))
+				if err := h.wgCtrl.UpdatePeerEndpoint(h.cfg.Interface, h.peerPubKey, newEndpoint); err == nil {
+					h.log.Info("HUNTER", "[%s] Updated WireGuard peer endpoint to %s on config update", h.cfg.Interface, newEndpoint)
+					localP := h.localPort
+					if localP > 0 {
+						go h.sendProbePacket(localP, h.targetIP, port)
+					}
+				}
+			}
 		}
 	}
 
