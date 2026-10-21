@@ -141,7 +141,6 @@
           <div class="caption" id="iptablesSubtext">PREROUTING REDIRECT</div>
           <dl class="kv">
             <div class="kv-row"><dt>Port range</dt><dd id="iptablesRange">20000-30000</dd></div>
-            <div class="kv-row"><dt>Handshake shaping</dt><dd id="obfsState">Off</dd></div>
             <div class="kv-row"><dt>In-tunnel target</dt><dd id="tunnelPingTarget">Auto-detecting...</dd></div>
             <div class="kv-row"><dt>Failed pings</dt><dd id="failedPingsCount">0</dd></div>
           </dl>
@@ -207,7 +206,6 @@
               <option value="HUNTER">HUNTER</option>
               <option value="WG">WIREGUARD</option>
               <option value="IPTABLES">IPTABLES</option>
-              <option value="OBFS">OBFS</option>
               <option value="PING">PING</option>
               <option value="WEB">WEB</option>
             </select>
@@ -383,15 +381,6 @@
   - "198.51.100.1"
   - "2001:db8::1"
   - "vps.example.com"</code></pre>
-          </div>
-          <div class="help-box">
-            <h4>Handshake obfuscation</h4>
-            <p>Linux only. Sends decoy packets before each WireGuard handshake and can split it into IP fragments. The peer needs no changes.</p>
-            <pre><code>obfuscation:
-  enabled: true
-  decoys: 3
-  decoy_ttl: 4
-  fragment: true</code></pre>
           </div>
           <div class="help-box">
             <h4>Policy routing failover</h4>

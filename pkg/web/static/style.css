@@ -373,10 +373,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .tunnel-body > .group:first-child { border-top: none; }
 .group-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); }
 .group-label .switch-label { text-transform: none; letter-spacing: 0; font-weight: 400; }
-.group-note { font-size: 12px; color: var(--text-dim); margin-top: -6px; }
 .group-fields { display: flex; flex-direction: column; gap: 12px; }
 .group.off .group-fields { opacity: 0.45; pointer-events: none; }
-.group.off .group-note { display: none; }
 
 /* Editor */
 .editor-wrapper { flex-direction: column; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }

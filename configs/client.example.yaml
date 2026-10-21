@@ -55,16 +55,12 @@ tunnels:
       failure_threshold: 3
     history_file: "history-wgBridge0.json"
     iptables: true
-    # Hide the handshake from DPI (Linux only): decoy packets before each 148/92-byte
-    # handshake message and optional IPv4 fragmentation. The peer needs no changes.
-    obfuscation:
-      enabled: false
-      decoys: 3
-      decoy_ttl: 0          # e.g. 4 so decoys expire before reaching the server
-      fragment: false
 
   - interface: "wgBridge1"
     name: "Upstream-Backup"
+    # Run this tunnel on AmneziaWG instead of stock WireGuard (needs the awg tool, and an
+    # interface created with awg-quick; see the AmneziaWG section of the README):
+    # backend: "amneziawg"
     target_ip: "198.51.100.2" # Single IP fallback format also supported
     port_range: "25000-29999"
     remote_port_range: "25000-29999"

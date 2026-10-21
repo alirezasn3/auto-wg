@@ -31,25 +31,31 @@ type RoutingConfig struct {
 	Metric  int    `yaml:"metric" json:"metric"`   // Default route metric (default: 100)
 }
 
+// WireGuard implementations a tunnel interface can run on.
+const (
+	BackendWireGuard = "wireguard" // stock WireGuard, controlled through wgctrl (default)
+	BackendAmneziaWG = "amneziawg" // AmneziaWG (kernel module or amneziawg-go), controlled through the awg command
+)
+
 type TunnelConfig struct {
-	Interface        string            `yaml:"interface" json:"interface"`                                 // Interface name, e.g. "wg0", "wgBridge"
-	Name             string            `yaml:"name" json:"name"`                                           // Descriptive name (e.g. "Client-A", "Frankfurt-Main")
-	TargetIP         string            `yaml:"target_ip,omitempty" json:"target_ip,omitempty"`             // Optional remote endpoint IP / fallback
-	TargetIPs        []string          `yaml:"target_ips,omitempty" json:"target_ips,omitempty"`           // Multiple candidate destination IPs / hostnames (IPv4 & IPv6)
-	PeerPublicKey    string            `yaml:"peer_public_key,omitempty" json:"peer_public_key,omitempty"` // Optional peer public key
-	PortRange        string            `yaml:"port_range" json:"port_range"`                               // Local forwarded port range
-	RemotePortRange  string            `yaml:"remote_port_range" json:"remote_port_range"`                 // Remote peer's port range
-	Hunting          *bool             `yaml:"hunting,omitempty" json:"hunting,omitempty"`                 // Enable autonomous port hunting (default: true). Set false for passive/MikroTik peers!
-	Passive          bool              `yaml:"passive,omitempty" json:"passive,omitempty"`                 // Alias for hunting: false (monitor & ping only, no port rotation)
-	CheckInterval    time.Duration     `yaml:"check_interval" json:"check_interval"`                       // Check frequency (default: 3s)
-	HandshakeTimeout time.Duration     `yaml:"handshake_timeout" json:"handshake_timeout"`                 // Stale handshake threshold (default: 60s)
-	CycleTimeout     time.Duration     `yaml:"cycle_timeout" json:"cycle_timeout"`                         // Staggered turn duration (default: 8s)
-	TunnelPing       TunnelPingConfig  `yaml:"tunnel_ping" json:"tunnel_ping"`
-	Obfuscation      ObfuscationConfig `yaml:"obfuscation,omitempty" json:"obfuscation"` // DPI evasion for outgoing handshake packets (Linux, needs NFQUEUE)
-	HistoryFile      string            `yaml:"history_file" json:"history_file"`         // Persistent history file path
-	Iptables         bool              `yaml:"iptables" json:"iptables"`                 // Manage iptables REDIRECT rule (default: true)
-	PostUp           []string          `yaml:"post_up" json:"post_up"`                   // Per-tunnel post_up shell commands
-	PreDown          []string          `yaml:"pre_down" json:"pre_down"`                 // Per-tunnel pre_down shell commands
+	Interface        string           `yaml:"interface" json:"interface"` // Interface name, e.g. "wg0", "wgBridge"
+	Backend          string           `yaml:"backend,omitempty" json:"backend,omitempty"` // "wireguard" (default) or "amneziawg"
+	Name             string           `yaml:"name" json:"name"`           // Descriptive name (e.g. "Client-A", "Frankfurt-Main")
+	TargetIP         string           `yaml:"target_ip,omitempty" json:"target_ip,omitempty"` // Optional remote endpoint IP / fallback
+	TargetIPs        []string         `yaml:"target_ips,omitempty" json:"target_ips,omitempty"` // Multiple candidate destination IPs / hostnames (IPv4 & IPv6)
+	PeerPublicKey    string           `yaml:"peer_public_key,omitempty" json:"peer_public_key,omitempty"` // Optional peer public key
+	PortRange        string           `yaml:"port_range" json:"port_range"` // Local forwarded port range
+	RemotePortRange  string           `yaml:"remote_port_range" json:"remote_port_range"` // Remote peer's port range
+	Hunting          *bool            `yaml:"hunting,omitempty" json:"hunting,omitempty"` // Enable autonomous port hunting (default: true). Set false for passive/MikroTik peers!
+	Passive          bool             `yaml:"passive,omitempty" json:"passive,omitempty"` // Alias for hunting: false (monitor & ping only, no port rotation)
+	CheckInterval    time.Duration    `yaml:"check_interval" json:"check_interval"`       // Check frequency (default: 3s)
+	HandshakeTimeout time.Duration    `yaml:"handshake_timeout" json:"handshake_timeout"` // Stale handshake threshold (default: 60s)
+	CycleTimeout     time.Duration    `yaml:"cycle_timeout" json:"cycle_timeout"`         // Staggered turn duration (default: 8s)
+	TunnelPing       TunnelPingConfig `yaml:"tunnel_ping" json:"tunnel_ping"`
+	HistoryFile      string           `yaml:"history_file" json:"history_file"` // Persistent history file path
+	Iptables         bool             `yaml:"iptables" json:"iptables"`         // Manage iptables REDIRECT rule (default: true)
+	PostUp           []string         `yaml:"post_up" json:"post_up"`           // Per-tunnel post_up shell commands
+	PreDown          []string         `yaml:"pre_down" json:"pre_down"`         // Per-tunnel pre_down shell commands
 }
 
 type TunnelPingConfig struct {
@@ -58,22 +64,6 @@ type TunnelPingConfig struct {
 	Interval         time.Duration `yaml:"interval" json:"interval"`                   // Ping interval (default: 2s)
 	Timeout          time.Duration `yaml:"timeout" json:"timeout"`                     // Single ping timeout (default: 2s)
 	FailureThreshold int           `yaml:"failure_threshold" json:"failure_threshold"` // Consecutive failed pings before hunt (default: 3)
-}
-
-// ObfuscationConfig hides WireGuard handshake packets (148-byte initiation, 92-byte response)
-// from DPI. Outgoing handshakes are intercepted via NFQUEUE and surrounded by decoy packets and/or
-// split into IP fragments. Only the sender needs it; the peer can run stock WireGuard.
-type ObfuscationConfig struct {
-	Enabled          bool `yaml:"enabled" json:"enabled"`
-	Decoys           int  `yaml:"decoys" json:"decoys"`                 // Junk UDP packets sent before every handshake packet (default: 3)
-	DecoyMinSize     int  `yaml:"decoy_min_size" json:"decoy_min_size"` // Decoy payload size range in bytes (default: 40-120)
-	DecoyMaxSize     int  `yaml:"decoy_max_size" json:"decoy_max_size"`
-	DecoyTTL         int  `yaml:"decoy_ttl" json:"decoy_ttl"`                     // 0 = same TTL as the real packet; a low value (e.g. 4) makes decoys expire before the server
-	DecoyBadChecksum bool `yaml:"decoy_bad_checksum" json:"decoy_bad_checksum"`   // Corrupt the UDP checksum so the server's stack drops decoys but DPI still sees them
-	DelayMs          int  `yaml:"delay_ms" json:"delay_ms"`                       // Pause between the decoys and the real packet
-	Fragment         bool `yaml:"fragment" json:"fragment"`                       // Send the real handshake as two IPv4 fragments (IPv6 is left untouched)
-	FragmentSplit    int  `yaml:"fragment_split" json:"fragment_split"`           // Bytes of the UDP datagram in the first fragment, multiple of 8 (default: 8 = header only)
-	QueueNum         int  `yaml:"queue_num,omitempty" json:"queue_num,omitempty"` // NFQUEUE number, 0 = assigned automatically
 }
 
 type WebConfig struct {
@@ -180,7 +170,7 @@ func SetDefaults(cfg *Config) {
 		if t.Name == "" {
 			t.Name = t.Interface
 		}
-		setObfuscationDefaults(&t.Obfuscation)
+		t.Backend = NormalizeBackend(t.Backend)
 		if t.Hunting == nil {
 			defaultHunting := !t.Passive
 			t.Hunting = &defaultHunting
@@ -213,43 +203,16 @@ func SetDefaults(cfg *Config) {
 	}
 }
 
-func setObfuscationDefaults(o *ObfuscationConfig) {
-	if o.Decoys == 0 && !o.Fragment {
-		o.Decoys = 3
+// NormalizeBackend maps the accepted spellings to a backend constant; unknown values are kept so that
+// Validate can report them.
+func NormalizeBackend(b string) string {
+	switch strings.ToLower(strings.TrimSpace(b)) {
+	case "", "wireguard", "wg":
+		return BackendWireGuard
+	case "amneziawg", "amnezia", "awg":
+		return BackendAmneziaWG
 	}
-	if o.DecoyMinSize <= 0 {
-		o.DecoyMinSize = 40
-	}
-	if o.DecoyMaxSize <= 0 {
-		o.DecoyMaxSize = 120
-	}
-	if o.DecoyMaxSize < o.DecoyMinSize {
-		o.DecoyMaxSize = o.DecoyMinSize
-	}
-	if o.FragmentSplit <= 0 {
-		o.FragmentSplit = 8
-	}
-}
-
-// ValidateObfuscation checks the bounds of the obfuscation settings.
-func ValidateObfuscation(o ObfuscationConfig) error {
-	switch {
-	case o.Decoys < 0 || o.Decoys > 20:
-		return fmt.Errorf("decoys must be between 0 and 20")
-	case o.DecoyMinSize < 1 || o.DecoyMaxSize > 1200:
-		return fmt.Errorf("decoy sizes must be between 1 and 1200 bytes")
-	case o.DecoyMinSize > o.DecoyMaxSize:
-		return fmt.Errorf("decoy_min_size must not exceed decoy_max_size")
-	case o.DecoyTTL < 0 || o.DecoyTTL > 255:
-		return fmt.Errorf("decoy_ttl must be between 0 and 255")
-	case o.DelayMs < 0 || o.DelayMs > 1000:
-		return fmt.Errorf("delay_ms must be between 0 and 1000")
-	case o.FragmentSplit < 8 || o.FragmentSplit > 152 || o.FragmentSplit%8 != 0:
-		return fmt.Errorf("fragment_split must be a multiple of 8 between 8 and 152")
-	case o.QueueNum < 0 || o.QueueNum > 65535:
-		return fmt.Errorf("queue_num must be between 0 and 65535")
-	}
-	return nil
+	return strings.TrimSpace(b)
 }
 
 // Validate checks for configuration sanity, non-empty interfaces, unique names,
@@ -277,10 +240,8 @@ func Validate(cfg *Config) error {
 		}
 		seenIfaces[iface] = true
 
-		if t.Obfuscation.Enabled {
-			if err := ValidateObfuscation(t.Obfuscation); err != nil {
-				return fmt.Errorf("tunnel %q obfuscation: %w", iface, err)
-			}
+		if b := NormalizeBackend(t.Backend); b != BackendWireGuard && b != BackendAmneziaWG {
+			return fmt.Errorf("tunnel %q has unknown backend %q (use %q or %q)", iface, t.Backend, BackendWireGuard, BackendAmneziaWG)
 		}
 
 		if t.Iptables && t.PortRange != "" {

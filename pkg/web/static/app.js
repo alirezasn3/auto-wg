@@ -113,7 +113,6 @@ class AutoWGApp {
     this.iptablesStateText = document.getElementById('iptablesStateText');
     this.iptablesSubtext = document.getElementById('iptablesSubtext');
     this.iptablesRange = document.getElementById('iptablesRange');
-    this.obfsState = document.getElementById('obfsState');
     this.tunnelPingTarget = document.getElementById('tunnelPingTarget');
     this.failedPingsCount = document.getElementById('failedPingsCount');
 
@@ -392,7 +391,7 @@ class AutoWGApp {
     this.renderTimestamps(data);
 
     // 2. Local Node
-    this.wgInterface.textContent = data.interface || 'wg0';
+    this.wgInterface.textContent = (data.interface || 'wg0') + (data.backend === 'amneziawg' ? ' · AmneziaWG' : '');
     this.localPort.textContent = data.local_port > 0 ? `:${data.local_port}` : '--';
     this.localPortRange.textContent = data.local_port_range || '--';
     this.localPubKey.textContent = data.local_public_key || '--';
@@ -504,7 +503,6 @@ class AutoWGApp {
       this.iptablesSubtext.textContent = 'Disabled / Non-Linux';
     }
     this.iptablesRange.textContent = data.local_port_range || '--';
-    this.renderObfuscation(fullData.obfuscation && fullData.obfuscation[data.interface]);
     this.tunnelPingTarget.textContent = data.in_tunnel_ping_target || 'Auto-detecting...';
     if (!data.ping_enabled) {
       this.failedPingsCount.textContent = 'Disabled';
@@ -525,19 +523,6 @@ class AutoWGApp {
 
     // Connection Events History
     this.renderEvents(data.events);
-  }
-
-  renderObfuscation(o) {
-    if (!this.obfsState) return;
-    if (!o || !o.active) {
-      this.obfsState.textContent = 'Off';
-      this.obfsState.style.color = 'var(--text-muted)';
-      return;
-    }
-    const parts = [`${o.handshakes} handshakes`, `${o.decoys} decoys`];
-    if (o.fragmented) parts.push(`${o.fragmented} fragmented`);
-    this.obfsState.textContent = `On · ${parts.join(', ')}`;
-    this.obfsState.style.color = 'var(--success)';
   }
 
   renderTunnelSwitcher(fullData) {
@@ -879,8 +864,7 @@ class AutoWGApp {
           hunting: true,
           iptables: true,
           target_ips: [],
-          tunnel_ping: { enabled: false, target_ip: '', interval: '2s', failure_threshold: 3 },
-          obfuscation: { enabled: false }
+          tunnel_ping: { enabled: false, target_ip: '', interval: '2s', failure_threshold: 3 }
         }, true);
         this.onConfigFormChange();
       });
@@ -1100,8 +1084,6 @@ class AutoWGApp {
     const isHunting = tunnel.hunting !== false;
     const isIptables = tunnel.iptables !== false;
     const ping = tunnel.tunnel_ping || {};
-    const ob = tunnel.obfuscation || {};
-    const obNum = (v, def) => (Number.isFinite(v) ? v : def);
     const text = (cls, value, placeholder = '') =>
       `<input type="text" class="form-input ${cls}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" spellcheck="false">`;
     const num = (cls, value, placeholder = '') =>
@@ -1120,9 +1102,12 @@ class AutoWGApp {
       <div class="tunnel-body">
         <div class="group">
           <div class="group-label">Connection</div>
-          <div class="form-grid-2">
+          <div class="form-grid-3">
             ${formField('Interface *', text('t-interface', tunnel.interface || '', 'wg0'), 'System interface name (ip link show)')}
             ${formField('Name', text('t-name', tunnel.name || '', 'Frankfurt-VPS'), 'Shown in the dashboard and logs')}
+            ${formField('Backend', backendSelect(tunnel.backend), 'AmneziaWG needs the awg tool and an interface created with awg-quick; its obfuscation settings stay in that interface config.')}
+          </div>
+          <div class="form-grid-2">
             ${formField('Local port range', text('t-port-range', tunnel.port_range || '20000-30000', '20000-30000'), 'Redirected to the WireGuard listen port')}
             ${formField('Remote port range', text('t-remote-port-range', tunnel.remote_port_range || '20000-30000', '20000-30000'), 'Ports tried on the peer when the link stalls')}
           </div>
@@ -1131,28 +1116,6 @@ class AutoWGApp {
           <div class="toggle-row">
             ${formToggle('t-hunting', isHunting, 'Rotate ports automatically when the link stalls')}
             ${formToggle('t-iptables', isIptables, 'Manage the iptables REDIRECT rule')}
-          </div>
-        </div>
-
-        <div class="group group-obfs ${ob.enabled ? '' : 'off'}">
-          <div class="group-label">
-            Handshake obfuscation
-            ${formToggle('t-obfs-enabled', !!ob.enabled, 'Enabled')}
-          </div>
-          <p class="group-note">Linux only. Hides the 148-byte initiation and 92-byte response from DPI by sending decoys first and optionally fragmenting the real packet. The peer needs no changes.</p>
-          <div class="group-fields">
-            <div class="form-grid-3">
-              ${formField('Decoys per handshake', num('t-obfs-decoys', obNum(ob.decoys, 3), '3'))}
-              ${formField('Decoy size min (bytes)', num('t-obfs-min', obNum(ob.decoy_min_size, 40), '40'))}
-              ${formField('Decoy size max (bytes)', num('t-obfs-max', obNum(ob.decoy_max_size, 120), '120'))}
-              ${formField('Decoy TTL', num('t-obfs-ttl', obNum(ob.decoy_ttl, 0), '0'), '0 = same as the real packet. A low value (e.g. 4) makes decoys expire before the server.')}
-              ${formField('Delay (ms)', num('t-obfs-delay', obNum(ob.delay_ms, 0), '0'), 'Pause between decoys and the real packet')}
-              ${formField('Fragment split (bytes)', num('t-obfs-split', obNum(ob.fragment_split, 8), '8'), 'Multiple of 8. 8 puts only the UDP header in the first fragment.')}
-            </div>
-            <div class="toggle-row">
-              ${formToggle('t-obfs-badsum', !!ob.decoy_bad_checksum, 'Corrupt decoy checksum (the server drops them, DPI still sees them)')}
-              ${formToggle('t-obfs-fragment', !!ob.fragment, 'Send the handshake as IPv4 fragments')}
-            </div>
           </div>
         </div>
 
@@ -1211,7 +1174,6 @@ class AutoWGApp {
       const group = card.querySelector(groupSel);
       sw?.addEventListener('change', () => group?.classList.toggle('off', !sw.checked));
     };
-    bindGroupSwitch('.t-obfs-enabled', '.group-obfs');
     bindGroupSwitch('.t-ping-enabled', '.group-ping');
 
     // Remove lives inside <summary>, so keep the click from folding the card
@@ -1256,6 +1218,7 @@ class AutoWGApp {
       const hunting = card.querySelector('.t-hunting')?.checked ?? true;
       const iptables = card.querySelector('.t-iptables')?.checked ?? true;
       const peerPubKey = card.querySelector('.t-peer-pubkey')?.value.trim() || '';
+      const backend = card.querySelector('.t-backend')?.value || 'wireguard';
 
       const targetIpsRaw = card.querySelector('.t-target-ips')?.value || '';
       const targetIps = targetIpsRaw.split('\n').map(s => s.trim()).filter(s => s.length > 0);
@@ -1274,18 +1237,6 @@ class AutoWGApp {
         const n = parseInt(card.querySelector(sel)?.value, 10);
         return Number.isNaN(n) ? def : n;
       };
-      const obfuscation = {
-        enabled: card.querySelector('.t-obfs-enabled')?.checked ?? false,
-        decoys: intVal('.t-obfs-decoys', 3),
-        decoy_min_size: intVal('.t-obfs-min', 40),
-        decoy_max_size: intVal('.t-obfs-max', 120),
-        decoy_ttl: intVal('.t-obfs-ttl', 0),
-        decoy_bad_checksum: card.querySelector('.t-obfs-badsum')?.checked ?? false,
-        delay_ms: intVal('.t-obfs-delay', 0),
-        fragment: card.querySelector('.t-obfs-fragment')?.checked ?? false,
-        fragment_split: intVal('.t-obfs-split', 8)
-      };
-
       const postUpRaw = card.querySelector('.t-post-up')?.value || '';
       const postUp = postUpRaw.split('\n').map(s => s.trim()).filter(s => s.length > 0);
       const preDownRaw = card.querySelector('.t-pre-down')?.value || '';
@@ -1293,6 +1244,7 @@ class AutoWGApp {
 
       const tunnelObj = {
         interface: iface,
+        backend: backend,
         name: name,
         port_range: portRange,
         remote_port_range: remotePortRange,
@@ -1309,8 +1261,7 @@ class AutoWGApp {
           target_ip: pingTarget,
           interval: pingInterval,
           failure_threshold: pingThreshold
-        },
-        obfuscation: obfuscation
+        }
       };
       if (historyFile) tunnelObj.history_file = historyFile;
       if (postUp.length > 0) tunnelObj.post_up = postUp;
@@ -1375,6 +1326,7 @@ class AutoWGApp {
     lines.push('tunnels:');
     for (const t of cfg.tunnels) {
       lines.push(`  - interface: "${t.interface}"`);
+      if (t.backend && t.backend !== 'wireguard') lines.push(`    backend: "${t.backend}"`);
       if (t.name) lines.push(`    name: "${t.name}"`);
       if (t.port_range) lines.push(`    port_range: "${t.port_range}"`);
       if (t.remote_port_range) lines.push(`    remote_port_range: "${t.remote_port_range}"`);
@@ -1397,20 +1349,6 @@ class AutoWGApp {
         if (t.tunnel_ping.target_ip) lines.push(`      target_ip: "${t.tunnel_ping.target_ip}"`);
         if (t.tunnel_ping.interval) lines.push(`      interval: "${t.tunnel_ping.interval}"`);
         if (t.tunnel_ping.failure_threshold) lines.push(`      failure_threshold: ${t.tunnel_ping.failure_threshold}`);
-      }
-
-      const o = t.obfuscation;
-      if (o && (o.enabled || !isDefaultObfuscation(o))) {
-        lines.push('    obfuscation:');
-        lines.push(`      enabled: ${o.enabled ? 'true' : 'false'}`);
-        lines.push(`      decoys: ${o.decoys}`);
-        lines.push(`      decoy_min_size: ${o.decoy_min_size}`);
-        lines.push(`      decoy_max_size: ${o.decoy_max_size}`);
-        lines.push(`      decoy_ttl: ${o.decoy_ttl}`);
-        lines.push(`      decoy_bad_checksum: ${o.decoy_bad_checksum ? 'true' : 'false'}`);
-        lines.push(`      delay_ms: ${o.delay_ms}`);
-        lines.push(`      fragment: ${o.fragment ? 'true' : 'false'}`);
-        lines.push(`      fragment_split: ${o.fragment_split}`);
       }
 
       if (t.check_interval && t.check_interval !== '3s') lines.push(`    check_interval: "${t.check_interval}"`);
@@ -1660,14 +1598,14 @@ function formField(label, control, hint = '') {
   return `<div class="form-group"><label class="form-label">${label}</label>${control}${hint ? `<span class="form-hint">${hint}</span>` : ''}</div>`;
 }
 
-function formToggle(cls, checked, text) {
-  return `<label class="switch-label"><input type="checkbox" class="${cls}" ${checked ? 'checked' : ''}><span class="switch-slider"></span><span class="switch-text">${text}</span></label>`;
+function backendSelect(current) {
+  const value = current === 'amneziawg' ? 'amneziawg' : 'wireguard';
+  const option = (v, label) => `<option value="${v}" ${v === value ? 'selected' : ''}>${label}</option>`;
+  return `<select class="form-input t-backend">${option('wireguard', 'WireGuard')}${option('amneziawg', 'AmneziaWG')}</select>`;
 }
 
-// True when every obfuscation setting is still at its default, so a disabled block can be left out of the YAML.
-function isDefaultObfuscation(o) {
-  return o.decoys === 3 && o.decoy_min_size === 40 && o.decoy_max_size === 120 && o.decoy_ttl === 0 &&
-    !o.decoy_bad_checksum && o.delay_ms === 0 && !o.fragment && o.fragment_split === 8;
+function formToggle(cls, checked, text) {
+  return `<label class="switch-label"><input type="checkbox" class="${cls}" ${checked ? 'checked' : ''}><span class="switch-slider"></span><span class="switch-text">${text}</span></label>`;
 }
 
 function escapeHtml(str) {

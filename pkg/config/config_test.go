@@ -234,47 +234,26 @@ func TestHasHostnames(t *testing.T) {
 
 
 
-func TestObfuscationDefaultsAndValidation(t *testing.T) {
+func TestBackendDefaultsAndValidation(t *testing.T) {
 	cfg := &Config{Mode: "server", Tunnels: []TunnelConfig{
-		{Interface: "wg0", Obfuscation: ObfuscationConfig{Enabled: true}},
-		{Interface: "wg1", Obfuscation: ObfuscationConfig{Enabled: true, Fragment: true}},
+		{Interface: "wg0"},
+		{Interface: "wg1", Backend: "AWG"},
+		{Interface: "wg2", Backend: "AmneziaWG"},
 	}}
 	SetDefaults(cfg)
-
-	o := cfg.Tunnels[0].Obfuscation
-	if o.Decoys != 3 || o.DecoyMinSize != 40 || o.DecoyMaxSize != 120 || o.FragmentSplit != 8 {
-		t.Errorf("unexpected defaults: %+v", o)
-	}
-	if cfg.Tunnels[1].Obfuscation.Decoys != 0 {
-		t.Errorf("fragment-only tunnel should keep decoys at 0, got %d", cfg.Tunnels[1].Obfuscation.Decoys)
-	}
-	if err := Validate(cfg); err != nil {
-		t.Fatalf("defaults must validate: %v", err)
-	}
-
-	bad := []func(*ObfuscationConfig){
-		func(o *ObfuscationConfig) { o.Decoys = 21 },
-		func(o *ObfuscationConfig) { o.DecoyMinSize, o.DecoyMaxSize = 100, 50 },
-		func(o *ObfuscationConfig) { o.DecoyMaxSize = 5000 },
-		func(o *ObfuscationConfig) { o.DecoyTTL = 300 },
-		func(o *ObfuscationConfig) { o.DelayMs = -1 },
-		func(o *ObfuscationConfig) { o.FragmentSplit = 12 },
-		func(o *ObfuscationConfig) { o.FragmentSplit = 160 },
-		func(o *ObfuscationConfig) { o.QueueNum = 70000 },
-	}
-	for i, mutate := range bad {
-		c := &Config{Mode: "server", Tunnels: []TunnelConfig{{Interface: "wg0", Obfuscation: ObfuscationConfig{Enabled: true}}}}
-		SetDefaults(c)
-		mutate(&c.Tunnels[0].Obfuscation)
-		if err := Validate(c); err == nil {
-			t.Errorf("case %d: expected a validation error", i)
+	want := []string{BackendWireGuard, BackendAmneziaWG, BackendAmneziaWG}
+	for i, w := range want {
+		if got := cfg.Tunnels[i].Backend; got != w {
+			t.Errorf("tunnel %d: backend = %q, want %q", i, got, w)
 		}
 	}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("valid backends rejected: %v", err)
+	}
 
-	// A disabled block is never validated, so stale values cannot block startup.
-	off := &Config{Mode: "server", Tunnels: []TunnelConfig{{Interface: "wg0", Obfuscation: ObfuscationConfig{Decoys: 99}}}}
-	SetDefaults(off)
-	if err := Validate(off); err != nil {
-		t.Errorf("disabled obfuscation should not be validated: %v", err)
+	bad := &Config{Mode: "server", Tunnels: []TunnelConfig{{Interface: "wg0", Backend: "openvpn"}}}
+	SetDefaults(bad)
+	if err := Validate(bad); err == nil {
+		t.Error("unknown backend must be rejected")
 	}
 }

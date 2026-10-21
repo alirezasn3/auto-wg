@@ -15,7 +15,6 @@ import (
 	"auto-wg/pkg/hunter"
 	"auto-wg/pkg/iptables"
 	"auto-wg/pkg/logger"
-	"auto-wg/pkg/obfs"
 	"auto-wg/pkg/wg"
 )
 
@@ -27,13 +26,13 @@ type SupervisorStatus struct {
 	Routing      config.RoutingConfig           `json:"routing"`
 	Tunnels      map[string]hunter.StatusReport `json:"tunnels"`
 	TunnelOrder  []string                       `json:"tunnel_order"`
-	Obfuscation  map[string]obfs.Status         `json:"obfuscation,omitempty"`
 }
 
 type Supervisor struct {
 	cfgPath       string
 	cfg           *config.Config
 	wgCtrl        *wg.Controller
+	awgCtrl       *wg.AWGController
 	iptMgr        *iptables.Manager
 	log           *logger.Logger
 	mu            sync.RWMutex
@@ -41,7 +40,6 @@ type Supervisor struct {
 	tunnelOrder   []string
 	hunterCancels map[string]context.CancelFunc
 	routeManager  *RouteManager
-	obfs          *obfs.Manager
 	ctx           context.Context
 }
 
@@ -58,12 +56,12 @@ func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *ipta
 		cfgPath:       cfgPath,
 		cfg:           cfg,
 		wgCtrl:        wgCtrl,
+		awgCtrl:       wg.NewAWGController(log, ""),
 		iptMgr:        iptMgr,
 		log:           log,
 		hunters:       make(map[string]*hunter.Hunter),
 		tunnelOrder:   make([]string, 0, len(cfg.Tunnels)),
 		hunterCancels: make(map[string]context.CancelFunc),
-		obfs:          obfs.NewManager(iptMgr, log),
 	}
 
 	cfgDir := filepath.Dir(cfgPath)
@@ -77,7 +75,7 @@ func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *ipta
 			}
 		}
 		s.tunnelOrder = append(s.tunnelOrder, t.Interface)
-		h := hunter.New(t, wgCtrl, iptMgr, log, s.handleStateChange)
+		h := hunter.New(t, s.backendFor(t), iptMgr, log, s.handleStateChange)
 		s.hunters[t.Interface] = h
 	}
 
@@ -86,6 +84,17 @@ func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *ipta
 	}
 
 	return s
+}
+
+// backendFor picks the WireGuard implementation a tunnel runs on.
+func (s *Supervisor) backendFor(t config.TunnelConfig) wg.Backend {
+	if t.Backend == config.BackendAmneziaWG {
+		if err := s.awgCtrl.Available(); err != nil {
+			s.log.Warn("SUPERVISOR", "[%s] AmneziaWG backend selected but unusable: %v", t.Interface, err)
+		}
+		return s.awgCtrl
+	}
+	return s.wgCtrl
 }
 
 func (s *Supervisor) handleStateChange(h *hunter.Hunter, oldState, newState string) {
@@ -130,8 +139,6 @@ func (s *Supervisor) Start(ctx context.Context) {
 			}
 		}
 
-		s.obfs.Apply(tCfg)
-
 		wgGroup.Add(1)
 		hCtx, hCancel := context.WithCancel(ctx)
 		s.hunterCancels[iface] = hCancel
@@ -172,8 +179,7 @@ func (s *Supervisor) Start(ctx context.Context) {
 		}
 	}
 
-	// 6. Stop handshake obfuscation and remove all iptables forwarding rules
-	s.obfs.Close()
+	// 6. Remove all iptables forwarding rules
 	if s.iptMgr != nil {
 		_ = s.iptMgr.RemoveAllRules()
 	}
@@ -245,7 +251,6 @@ func (s *Supervisor) GetStatus() SupervisorStatus {
 		Routing:      s.cfg.Routing,
 		Tunnels:      reports,
 		TunnelOrder:  orderCopy,
-		Obfuscation:  s.obfs.Status(),
 	}
 }
 
@@ -427,16 +432,21 @@ func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) 
 		newOrder = append(newOrder, t.Interface)
 	}
 
-	// 4. Clean up removed tunnels
+	// 4. Clean up removed tunnels, and tunnels whose backend changed (they are recreated below)
 	for iface, h := range s.hunters {
-		if _, exists := newTunnelMap[iface]; !exists {
-			s.log.Info("SUPERVISOR", "Removing tunnel %s (omitted from new configuration)", iface)
+		nt, exists := newTunnelMap[iface]
+		changed := exists && s.getTunnelConfigLocked(iface).Backend != nt.Backend
+		if !exists || changed {
+			if changed {
+				s.log.Info("SUPERVISOR", "Recreating tunnel %s (backend changed to %s)", iface, nt.Backend)
+			} else {
+				s.log.Info("SUPERVISOR", "Removing tunnel %s (omitted from new configuration)", iface)
+			}
 			if cancel, ok := s.hunterCancels[iface]; ok {
 				cancel()
 				delete(s.hunterCancels, iface)
 			}
 			_ = h.SaveHistory()
-			s.obfs.Remove(iface)
 			if s.iptMgr != nil {
 				_ = s.iptMgr.RemoveRule(iface)
 			}
@@ -446,12 +456,11 @@ func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) 
 
 	// 5. Update existing tunnels or start newly added ones
 	for _, t := range newCfg.Tunnels {
-		s.obfs.Apply(t)
 		if h, exists := s.hunters[t.Interface]; exists {
 			h.UpdateConfig(t)
 		} else {
 			s.log.Info("SUPERVISOR", "Adding new tunnel %s (%s)", t.Interface, t.Name)
-			h := hunter.New(t, s.wgCtrl, s.iptMgr, s.log, s.handleStateChange)
+			h := hunter.New(t, s.backendFor(t), s.iptMgr, s.log, s.handleStateChange)
 			s.hunters[t.Interface] = h
 			if s.ctx != nil {
 				hCtx, hCancel := context.WithCancel(s.ctx)

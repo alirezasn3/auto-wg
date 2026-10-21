@@ -44,6 +44,7 @@ type ConnectionEvent struct {
 
 type StatusReport struct {
 	Interface          string            `json:"interface"`
+	Backend            string            `json:"backend,omitempty"`
 	Name               string            `json:"name"`
 	State              string            `json:"state"`
 	LocalPublicKey     string            `json:"local_public_key"`
@@ -94,7 +95,7 @@ type StateChangeHandler func(h *Hunter, oldState, newState string)
 type Hunter struct {
 	cfg           config.TunnelConfig
 	historyFile   string
-	wgCtrl        *wg.Controller
+	wgCtrl        wg.Backend
 	iptMgr        *iptables.Manager
 	log           *logger.Logger
 	onStateChange StateChangeHandler
@@ -135,7 +136,7 @@ type Hunter struct {
 	manualTrigger        chan string
 }
 
-func New(tunnelCfg config.TunnelConfig, wgCtrl *wg.Controller, iptMgr *iptables.Manager, log *logger.Logger, onStateChange StateChangeHandler) *Hunter {
+func New(tunnelCfg config.TunnelConfig, wgCtrl wg.Backend, iptMgr *iptables.Manager, log *logger.Logger, onStateChange StateChangeHandler) *Hunter {
 	if tunnelCfg.CheckInterval <= 0 {
 		tunnelCfg.CheckInterval = 3 * time.Second
 	}
@@ -173,6 +174,18 @@ func New(tunnelCfg config.TunnelConfig, wgCtrl *wg.Controller, iptMgr *iptables.
 		initialTarget = resolved[0]
 	} else if tunnelCfg.TargetIP != "" {
 		initialTarget = strings.Trim(tunnelCfg.TargetIP, "[]")
+	}
+
+	// A nil *Controller wrapped in the interface must still read as "no backend".
+	switch c := wgCtrl.(type) {
+	case *wg.Controller:
+		if c == nil {
+			wgCtrl = nil
+		}
+	case *wg.AWGController:
+		if c == nil {
+			wgCtrl = nil
+		}
 	}
 
 	huntingEnabled := true
@@ -956,6 +969,7 @@ func (h *Hunter) GetStatus() StatusReport {
 
 	return StatusReport{
 		Interface:          h.cfg.Interface,
+		Backend:            h.cfg.Backend,
 		Name:               h.cfg.Name,
 		State:              h.state,
 		LocalPublicKey:     h.localPubKey,

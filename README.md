@@ -14,6 +14,7 @@ Auto-WG natively supports two primary deployment topologies:
 
 * **Zero-Negotiator Autonomous Hunting**: No external signaling relays, Cloudflare Workers, or rendezvous servers needed. Both peers monitor link state and recover 100% autonomously.
 * **Pure Netlink/UAPI WireGuard Control (`wgctrl`)**: Interacts directly with the Linux WireGuard kernel module via native Netlink without spawning sub-processes.
+* **AmneziaWG Support**: Each tunnel can run on stock WireGuard (default) or on [AmneziaWG](https://github.com/amnezia-vpn/amneziawg-go) (`backend: "amneziawg"`), whose junk packets, padded handshakes and custom headers defeat DPI that fingerprints the 148/92-byte WireGuard handshake. Stock and AmneziaWG tunnels can be mixed. See [AmneziaWG](#-amneziawg).
 * **Multi-Interface Architecture**: Supervise multiple tunnels simultaneously on a single machine, with isolated port ranges, independent health probes, and per-tunnel persistent state.
 * **Upstream Route Failover (Policy Routing / Table 200)**: In client mode, Auto-WG monitors upstream health and dynamically updates default routes in a designated routing table (e.g. `table 200`) using `ip route replace default dev <iface> table 200`. The host's main routing table and SSH sessions are never disrupted.
 * **PostUp & PreDown Lifecycle Hooks**: Execute custom shell commands (policy routing rules, iptables MASQUERADE, UFW forwardings) automatically upon daemon start and shutdown.
@@ -21,7 +22,6 @@ Auto-WG natively supports two primary deployment topologies:
 * **Automatic Peer Discovery**: Auto-WG queries each WireGuard interface and automatically extracts the single peer's public key, current endpoint, and handshake statistics directly from the kernel.
 * **Deterministic Anti-Collision Staggering**: Uses public key lexicographical comparison (`localPubKey < peerPubKey`) to coordinate turn-taking windows (e.g. 8s cycle) so peers do not collide or flap while hunting.
 * **Multi-Destination Dual-Stack Hunting (`target_ips`)**: Tunnels can specify multiple candidate destination endpoints (IPv4 & IPv6, or domain hostnames). If DPI blocks or throttles one address family, Auto-WG automatically round-robins between IPv4 and IPv6 during port hunting to punch through hostile firewalls.
-* **Handshake Obfuscation (Linux)**: DPI that fingerprints the 148-byte initiation and 92-byte response can be thrown off by sending decoy packets from the same 5-tuple before each handshake and, optionally, splitting the real packet into IPv4 fragments. Works on stock WireGuard; only the sender needs it. See [Handshake obfuscation](#-handshake-obfuscation).
 * **Integrated Web Dashboard & Public Status Page**: Modern, mobile-responsive web UI with multi-tunnel telemetry, active route indication, manual hunt/rebind triggers, live SSE logs, and an isolated bilingual (Persian & English) public status page.
 
 ---
@@ -233,6 +233,7 @@ sudo ./autowg --uninstall
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `interface` | string | **Required** | WireGuard interface name (`wg0`, `wgBridge0`, etc.) |
+| `backend` | string | `wireguard` | `"wireguard"` (stock WireGuard via netlink) or `"amneziawg"` (AmneziaWG via the `awg` tool) |
 | `name` | string | `""` | Human-friendly alias displayed on the web dashboard |
 | `target_ip` | string | `""` | Single remote destination IP or fallback |
 | `target_ips` | list of string | `[]` | Candidate destination IPs / domain names (IPv4 & IPv6) rotated during hunting |
@@ -247,15 +248,6 @@ sudo ./autowg --uninstall
 | `tunnel_ping.enabled` | bool | `true` | Active ICMP ping verification before hunting |
 | `tunnel_ping.target_ip` | string | `""` | In-tunnel IP of the remote peer to ping |
 | `tunnel_ping.failure_threshold` | int | `3` | Consecutive ping timeouts before declaring link down |
-| `obfuscation.enabled` | bool | `false` | Intercept outgoing handshakes via NFQUEUE and apply the options below (Linux, root) |
-| `obfuscation.decoys` | int | `3` | Junk UDP packets sent before every handshake packet (0-20) |
-| `obfuscation.decoy_min_size` / `decoy_max_size` | int | `40` / `120` | Decoy payload size range in bytes |
-| `obfuscation.decoy_ttl` | int | `0` | TTL of decoys; `0` keeps the real packet's TTL. A small value makes them expire before the server |
-| `obfuscation.decoy_bad_checksum` | bool | `false` | Corrupt the decoys' UDP checksum so the receiving stack drops them while DPI still sees them |
-| `obfuscation.delay_ms` | int | `0` | Pause between the decoys and the real packet |
-| `obfuscation.fragment` | bool | `false` | Send the real handshake as two IPv4 fragments (IPv6 is left untouched) |
-| `obfuscation.fragment_split` | int | `8` | Bytes of the UDP datagram in the first fragment, multiple of 8. `8` carries only the UDP header |
-| `obfuscation.queue_num` | int | auto | NFQUEUE number (auto-assigned from 4200) |
 | `history_file` | string | `""` | Persistent history file path (e.g. `"history-wg0.json"`, or `"off"` to disable) |
 | `post_up` | list of string | `[]` | Tunnel-specific shell commands executed after this interface starts |
 | `pre_down` | list of string | `[]` | Tunnel-specific shell commands executed before this interface stops |
@@ -281,33 +273,100 @@ sudo ./autowg --uninstall
 
 ---
 
-## 🛡️ Handshake obfuscation
+## 🛡️ AmneziaWG
 
-WireGuard handshake messages are authenticated, so they cannot be edited in flight, and the kernel module cannot be told to send different bytes. What can change is the traffic around them. With `obfuscation.enabled: true` Auto-WG:
+WireGuard's handshake messages are authenticated, so DPI that fingerprints them (the 148-byte initiation, the 92-byte response and their `01 00 00 00` / `02 00 00 00` headers) cannot be fooled from outside the tunnel. [AmneziaWG](https://github.com/amnezia-vpn/amneziawg-go) changes the wire format itself: junk packets before the handshake, random padding on every message type, custom message headers, protocol-imitating signature packets and, since 3.0, encrypted headers and padded content.
 
-1. adds `mangle/OUTPUT` NFQUEUE rules (with `--queue-bypass`, so traffic flows normally if Auto-WG is not running) that match UDP from the tunnel's `port_range` with a total length of 176 or 120 bytes (196 or 140 for IPv6): exactly the 148-byte initiation and 92-byte response;
-2. holds each such packet, sends `decoys` junk packets from the same source and destination address and port through a raw socket, then releases the real one;
-3. optionally drops the real packet and sends it as two IPv4 fragments instead.
-
-The peer needs no changes: it drops the decoys and reassembles the fragments. Both directions are covered, so it also applies to the 92-byte response when this host is the server.
+Set the backend per tunnel; everything else (port hunting, failover, ping, the dashboard) works the same:
 
 ```yaml
 tunnels:
-  - interface: "wg0"
+  - interface: "wgBridge0"
+    backend: "amneziawg"      # default: "wireguard"
+    target_ips: ["198.51.100.1"]
     port_range: "20000-24999"
-    obfuscation:
-      enabled: true
-      decoys: 3
-      decoy_ttl: 4          # hops to the DPI box; decoys expire before the server
-      fragment: true
+    remote_port_range: "20000-24999"
 ```
 
-Notes:
+Auto-WG never touches the obfuscation parameters. They live in the interface config, so new AmneziaWG releases work without changes here. It has been tested against AmneziaWG 3.1 (`amneziawg-go` v3.1.20260828 with `awg` from `amneziawg-tools` 3.1), with both 2.0-style and 3.x parameters.
 
-* Requires Linux, root, the `nfnetlink_queue` and `xt_length` kernel modules, and `iptables`.
-* Decoys inherit the packet's firewall mark, so `wg-quick` style policy routing keeps working.
-* Fragments bypass connection tracking, so Auto-WG looks up the port a `REDIRECT` rule would have restored in `/proc/net/nf_conntrack` and writes it into the fragments. If that cannot be determined for a response, that packet is sent unfragmented.
-* This raises the cost of fingerprinting; it is not a guarantee. If decoys alone are not enough, try `fragment: true`, then tune `decoy_ttl` to the hop count of the DPI box.
+### Install on the server
+
+Do this on **both** peers and run the same AmneziaWG release on both ends.
+
+*Ubuntu / Debian*, kernel module through the Amnezia PPA (needs kernel headers and `deb-src` enabled, see the [module README](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module#installation) for Debian):
+
+```bash
+sudo apt install -y software-properties-common python3-launchpadlib gnupg2 linux-headers-$(uname -r)
+sudo add-apt-repository ppa:amnezia/ppa
+sudo apt install -y amneziawg
+awg --version        # should report amneziawg-tools v3.x
+```
+
+*Fedora / RHEL*: `sudo dnf copr enable amneziavpn/amneziawg && sudo dnf install amneziawg-dkms amneziawg-tools`.
+
+*Without a kernel module* (containers, unsupported kernels): build the userspace implementation and the tools. `awg-quick` falls back to `amneziawg-go` automatically when the module is missing.
+
+```bash
+git clone https://github.com/amnezia-vpn/amneziawg-go && make -C amneziawg-go && sudo install amneziawg-go/amneziawg-go /usr/local/bin/
+git clone https://github.com/amnezia-vpn/amneziawg-tools && make -C amneziawg-tools/src && sudo make -C amneziawg-tools/src install
+```
+
+### Interface config
+
+AmneziaWG interfaces are created with `awg-quick`, from `/etc/amnezia/amneziawg/<interface>.conf`, instead of `wg-quick`; stock `wg-quick` rejects the extra keys. As with stock WireGuard, `ListenPort` and `Endpoint` are not needed because Auto-WG sets them. Generate keys with `awg genkey`.
+
+```ini
+# /etc/amnezia/amneziawg/wgBridge0.conf
+[Interface]
+PrivateKey = <private key>
+Address = 10.100.0.2/24
+
+# Must be identical on both peers
+S1 = 50
+S2 = 90
+S3 = 40
+S4 = 16
+H1 = 100000-200000
+H2 = 300000-400000
+H3 = 500000-600000
+H4 = 700000-800000
+HeaderProtectionKey = <output of `awg genkey`, shared by both peers>   # AmneziaWG 3+, needs S1-S4 >= 12
+
+# Per peer, may differ
+Jc = 6
+Jmin = 40
+Jmax = 120
+ContentPaddingAddition = 10-40                                         # AmneziaWG 3+
+# I1 = <b 0x...><r 32>                                                 # optional signature packets, I1-I5
+
+[Peer]
+PublicKey = <peer public key>
+AllowedIPs = 10.100.0.0/24
+PersistentKeepalive = 25
+```
+
+`S1`-`S4`, `H1`-`H4` and `HeaderProtectionKey` must match on both peers or no handshake completes; `Jc`/`Jmin`/`Jmax`, `I1`-`I5` and the timing options only shape what a peer sends. See the [amneziawg-go README](https://github.com/amnezia-vpn/amneziawg-go#configuration) for every parameter. Keep `Jmax` and the signature packets below the path MTU, or they get fragmented.
+
+### Start on boot
+
+```bash
+sudo systemctl enable --now awg-quick@wgBridge0     # one unit per interface; reads /etc/amnezia/amneziawg/wgBridge0.conf
+```
+
+The unit comes with `amneziawg-tools` (it is `awg-quick@.service`, installed when systemd is present). Make Auto-WG wait for the interface with a drop-in, then reload:
+
+```bash
+sudo systemctl edit autowg
+```
+
+```ini
+[Unit]
+After=awg-quick@wgBridge0.service
+Wants=awg-quick@wgBridge0.service
+```
+
+If Auto-WG does start first it keeps retrying until the interface appears, but it picks the initial listen port and endpoint at startup, so the ordering above is the reliable setup. Switching a tunnel's backend in the web editor recreates that tunnel.
 
 ---
 

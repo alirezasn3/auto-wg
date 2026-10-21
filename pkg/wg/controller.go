@@ -28,6 +28,19 @@ type DeviceInfo struct {
 	ReceiveBytes   int64
 }
 
+// Backend is the part of WireGuard control the hunter needs. Controller drives stock WireGuard
+// through wgctrl; AWGController drives AmneziaWG through the awg command.
+type Backend interface {
+	GetDeviceInfo(ifaceName, targetPeerPubkey string) (*DeviceInfo, error)
+	UpdateListenPort(ifaceName string, port int) error
+	UpdatePeerEndpoint(ifaceName, peerPubKey, endpoint string) error
+}
+
+var (
+	_ Backend = (*Controller)(nil)
+	_ Backend = (*AWGController)(nil)
+)
+
 type Controller struct {
 	client *wgctrl.Client
 	log    *logger.Logger
@@ -47,14 +60,14 @@ func NewController(log *logger.Logger) (*Controller, error) {
 }
 
 func (c *Controller) Close() error {
-	if c.client != nil {
+	if c != nil && c.client != nil {
 		return c.client.Close()
 	}
 	return nil
 }
 
 func (c *Controller) GetDeviceInfo(ifaceName, targetPeerPubkey string) (*DeviceInfo, error) {
-	if c.client == nil {
+	if c == nil || c.client == nil {
 		return nil, fmt.Errorf("wgctrl client not initialized")
 	}
 
@@ -97,11 +110,10 @@ func (c *Controller) GetDeviceInfo(ifaceName, targetPeerPubkey string) (*DeviceI
 
 // UpdateListenPort changes the local WireGuard listen port dynamically via wgctrl.
 func (c *Controller) UpdateListenPort(ifaceName string, port int) error {
-	c.log.Info("WG", "Updating local listen port on %s to %d", ifaceName, port)
-
-	if c.client == nil {
+	if c == nil || c.client == nil {
 		return fmt.Errorf("wgctrl client not initialized")
 	}
+	c.log.Info("WG", "Updating local listen port on %s to %d", ifaceName, port)
 
 	cfg := wgtypes.Config{
 		ListenPort: &port,
@@ -133,11 +145,10 @@ func NormalizeEndpoint(endpoint string) string {
 // UpdatePeerEndpoint updates the remote endpoint of the target peer via wgctrl.
 func (c *Controller) UpdatePeerEndpoint(ifaceName, peerPubKey, endpoint string) error {
 	endpoint = NormalizeEndpoint(endpoint)
-	c.log.Info("WG", "Updating peer %s endpoint on %s to %s", peerPubKey, ifaceName, endpoint)
-
-	if c.client == nil {
+	if c == nil || c.client == nil {
 		return fmt.Errorf("wgctrl client not initialized")
 	}
+	c.log.Info("WG", "Updating peer %s endpoint on %s to %s", peerPubKey, ifaceName, endpoint)
 
 	pubKey, err := wgtypes.ParseKey(peerPubKey)
 	if err != nil {

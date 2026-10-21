@@ -17,22 +17,8 @@ type Manager struct {
 	log         *logger.Logger
 	mu          sync.Mutex
 	activeRules map[string][]string // iface -> ruleSpec
-	queueRules  map[string][]queueRule
 	isLinux     bool
 }
-
-// queueRule is one mangle/OUTPUT NFQUEUE rule installed for handshake obfuscation.
-type queueRule struct {
-	v6   bool
-	spec []string
-}
-
-// Total IP packet lengths of a WireGuard handshake initiation (148 byte payload) and response (92 byte
-// payload) including IP and UDP headers. Data packets are 32+16n bytes and can never collide with these.
-var (
-	handshakeLengthsV4 = []int{176, 120}
-	handshakeLengthsV6 = []int{196, 140}
-)
 
 // NewManager initializes the iptables and ip6tables managers.
 func NewManager(log *logger.Logger) *Manager {
@@ -44,7 +30,6 @@ func NewManager(log *logger.Logger) *Manager {
 		return &Manager{
 			log:         log,
 			activeRules: make(map[string][]string),
-			queueRules:  make(map[string][]queueRule),
 			isLinux:     false,
 		}
 	}
@@ -54,7 +39,6 @@ func NewManager(log *logger.Logger) *Manager {
 		ipt6:        ipt6,
 		log:         log,
 		activeRules: make(map[string][]string),
-		queueRules:  make(map[string][]queueRule),
 		isLinux:     true,
 	}
 }
@@ -182,10 +166,6 @@ func (m *Manager) RemoveAllRules() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for iface := range m.queueRules {
-		m.removeQueueRulesLocked(iface)
-	}
-
 	if !m.isLinux || len(m.activeRules) == 0 {
 		return nil
 	}
@@ -201,89 +181,6 @@ func (m *Manager) RemoveAllRules() error {
 	}
 	m.activeRules = make(map[string][]string)
 	return nil
-}
-
-func (m *Manager) tableFor(v6 bool) *goiptables.IPTables {
-	if v6 {
-		return m.ipt6
-	}
-	return m.ipt4
-}
-
-// ApplyQueueRules sends outgoing WireGuard handshake packets from the tunnel's port range to an NFQUEUE:
-// iptables -t mangle -I OUTPUT -p udp --sport <range> -m length --length <n> -j NFQUEUE --queue-num <q> --queue-bypass
-// --queue-bypass makes the kernel accept the packet untouched if nothing is listening on the queue.
-func (m *Manager) ApplyQueueRules(iface, portRangeSpec string, queue int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if !m.isLinux {
-		return fmt.Errorf("iptables is not available on this system")
-	}
-	sport, err := FormatIptablesPortRange(portRangeSpec)
-	if err != nil {
-		return fmt.Errorf("format port range: %w", err)
-	}
-
-	var want []queueRule
-	for _, v6 := range []bool{false, true} {
-		lengths := handshakeLengthsV4
-		if v6 {
-			lengths = handshakeLengthsV6
-		}
-		for _, n := range lengths {
-			want = append(want, queueRule{v6: v6, spec: []string{
-				"-p", "udp", "--sport", sport,
-				"-m", "length", "--length", strconv.Itoa(n),
-				"-m", "comment", "--comment", "autowg-obfs-" + iface,
-				"-j", "NFQUEUE", "--queue-num", strconv.Itoa(queue), "--queue-bypass",
-			}})
-		}
-	}
-
-	m.removeQueueRulesLocked(iface)
-	var firstErr error
-	for _, r := range want {
-		ipt := m.tableFor(r.v6)
-		if ipt == nil {
-			continue
-		}
-		exists, err := ipt.Exists("mangle", "OUTPUT", r.spec...)
-		if err == nil && exists {
-			m.queueRules[iface] = append(m.queueRules[iface], r)
-			continue
-		}
-		if err := ipt.Insert("mangle", "OUTPUT", 1, r.spec...); err != nil {
-			m.log.Warn("IPTABLES", "[%s] Failed to insert NFQUEUE rule (ipv6=%v): %v", iface, r.v6, err)
-			if !r.v6 && firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		m.queueRules[iface] = append(m.queueRules[iface], r)
-	}
-	if firstErr != nil {
-		m.removeQueueRulesLocked(iface)
-		return fmt.Errorf("insert NFQUEUE rules: %w", firstErr)
-	}
-	m.log.Info("IPTABLES", "[%s] Handshake NFQUEUE rules active: UDP sport %s -> queue %d", iface, sport, queue)
-	return nil
-}
-
-// RemoveQueueRules deletes the NFQUEUE rules of a tunnel.
-func (m *Manager) RemoveQueueRules(iface string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.removeQueueRulesLocked(iface)
-}
-
-func (m *Manager) removeQueueRulesLocked(iface string) {
-	for _, r := range m.queueRules[iface] {
-		if ipt := m.tableFor(r.v6); ipt != nil {
-			_ = ipt.DeleteIfExists("mangle", "OUTPUT", r.spec...)
-		}
-	}
-	delete(m.queueRules, iface)
 }
 
 func sliceEqual(a, b []string) bool {
