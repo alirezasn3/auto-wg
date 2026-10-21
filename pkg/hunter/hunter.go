@@ -460,15 +460,9 @@ func (h *Hunter) initializeInterface() {
 				h.remotePort = initialRemotePort
 				h.lastDialedRemotePort = initialRemotePort
 				h.lastDialedAt = time.Now()
-				localP := h.localPort
 				h.mu.Unlock()
 				h.log.Info("HUNTER", "[%s] Auto-assigned peer endpoint to %s (from target_ips and remote_port_range %s)",
 					iface, initialEndpoint, remoteRange)
-
-				// Send initial probe
-				if localP > 0 {
-					go h.sendProbePacket(localP, targetIP, initialRemotePort)
-				}
 			} else {
 				h.log.Warn("HUNTER", "[%s] Failed to set initial peer endpoint %s: %v", iface, initialEndpoint, err)
 			}
@@ -887,43 +881,6 @@ func (h *Hunter) executeHunt(reason string) {
 		h.lastDialedAt = time.Now()
 		h.mu.Unlock()
 	}
-
-	// 4. Send probe UDP packet
-	go h.sendProbePacket(newLocalPort, targetIP, newRemotePort)
-}
-
-func (h *Hunter) sendProbePacket(localPort int, targetIP string, remotePort int) {
-	cleanIP := strings.Trim(targetIP, "[]")
-	parsedIP := net.ParseIP(cleanIP)
-	isIPv6 := parsedIP != nil && parsedIP.To4() == nil
-
-	remoteEndpoint := net.JoinHostPort(cleanIP, strconv.Itoa(remotePort))
-	network := "udp4"
-	localBind := fmt.Sprintf("0.0.0.0:%d", localPort)
-	if isIPv6 {
-		network = "udp6"
-		localBind = fmt.Sprintf("[::]:%d", localPort)
-	}
-
-	remoteAddr, err := net.ResolveUDPAddr(network, remoteEndpoint)
-	if err != nil {
-		return
-	}
-
-	localAddr, _ := net.ResolveUDPAddr(network, localBind)
-
-	conn, err := net.DialUDP(network, localAddr, remoteAddr)
-	if err != nil {
-		// Fallback to dialing without binding local address if local port is unavailable or family mismatch
-		conn, err = net.DialUDP(network, nil, remoteAddr)
-		if err != nil {
-			return
-		}
-	}
-	defer conn.Close()
-
-	probe := []byte{0x01, 0x00, 0x00, 0x00}
-	_, _ = conn.Write(probe)
 }
 
 // TriggerHunt initiates an immediate hunt cycle out-of-band.
@@ -1128,10 +1085,6 @@ func (h *Hunter) UpdateConfig(newCfg config.TunnelConfig) {
 				newEndpoint := net.JoinHostPort(h.targetIP, strconv.Itoa(port))
 				if err := h.wgCtrl.UpdatePeerEndpoint(h.cfg.Interface, h.peerPubKey, newEndpoint); err == nil {
 					h.log.Info("HUNTER", "[%s] Updated WireGuard peer endpoint to %s on config update", h.cfg.Interface, newEndpoint)
-					localP := h.localPort
-					if localP > 0 {
-						go h.sendProbePacket(localP, h.targetIP, port)
-					}
 				}
 			}
 		}

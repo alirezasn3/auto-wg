@@ -55,6 +55,13 @@ tunnels:
       failure_threshold: 3
     history_file: "history-wgBridge0.json"
     iptables: true
+    # Hide the handshake from DPI (Linux only): decoy packets before each 148/92-byte
+    # handshake message and optional IPv4 fragmentation. The peer needs no changes.
+    obfuscation:
+      enabled: false
+      decoys: 3
+      decoy_ttl: 0          # e.g. 4 so decoys expire before reaching the server
+      fragment: false
 
   - interface: "wgBridge1"
     name: "Upstream-Backup"

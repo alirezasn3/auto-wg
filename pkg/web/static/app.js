@@ -29,8 +29,6 @@ class AutoWGApp {
     this.btnReloadConfig = document.getElementById('btnReloadConfig');
     this.btnCopyConfigPath = document.getElementById('btnCopyConfigPath');
     this.editorLineCount = document.getElementById('editorLineCount');
-    this.btnToggleHelp = document.getElementById('btnToggleHelp');
-    this.configHelpContent = document.getElementById('configHelpContent');
     this.configOriginalYaml = '';
     this.configIsDirty = false;
     this.configLoaded = false;
@@ -57,16 +55,10 @@ class AutoWGApp {
     this.tunnelFormCount = document.getElementById('tunnelFormCount');
 
     // Form Controls: Shell Hooks
-    this.headerShellHooks = document.getElementById('headerShellHooks');
-    this.bodyShellHooks = document.getElementById('bodyShellHooks');
-    this.toggleIconShell = document.getElementById('toggleIconShell');
     this.cfgPostUp = document.getElementById('cfgPostUp');
     this.cfgPreDown = document.getElementById('cfgPreDown');
 
     // Form Controls: Web & Status
-    this.headerWebSettings = document.getElementById('headerWebSettings');
-    this.bodyWebSettings = document.getElementById('bodyWebSettings');
-    this.toggleIconWeb = document.getElementById('toggleIconWeb');
     this.cfgWebEnabled = document.getElementById('cfgWebEnabled');
     this.cfgWebListen = document.getElementById('cfgWebListen');
     this.cfgWebAllowedIPs = document.getElementById('cfgWebAllowedIPs');
@@ -121,6 +113,7 @@ class AutoWGApp {
     this.iptablesStateText = document.getElementById('iptablesStateText');
     this.iptablesSubtext = document.getElementById('iptablesSubtext');
     this.iptablesRange = document.getElementById('iptablesRange');
+    this.obfsState = document.getElementById('obfsState');
     this.tunnelPingTarget = document.getElementById('tunnelPingTarget');
     this.failedPingsCount = document.getElementById('failedPingsCount');
 
@@ -350,18 +343,18 @@ class AutoWGApp {
     if (this.statusTimeline) {
       if (state === 'CONNECTED') {
         if (data.last_connected_at && !data.last_connected_at.startsWith('0001')) {
-          this.statusTimeline.innerHTML = `🟢 <strong>Connected:</strong> ${formatTimestampAndAgo(data.last_connected_at)}`;
+          this.statusTimeline.innerHTML = `<span class="legend-dot dot-connected"></span><strong>Connected</strong> ${formatTimestampAndAgo(data.last_connected_at)}`;
         } else {
-          this.statusTimeline.innerHTML = `🟢 <strong>Connected</strong>`;
+          this.statusTimeline.innerHTML = `<span class="legend-dot dot-connected"></span><strong>Connected</strong>`;
         }
       } else if (state === 'HUNTING' || state === 'STALLED') {
         if (data.last_disconnected_at && !data.last_disconnected_at.startsWith('0001')) {
-          this.statusTimeline.innerHTML = `🔴 <strong>Disconnected:</strong> ${formatTimestampAndAgo(data.last_disconnected_at)}`;
+          this.statusTimeline.innerHTML = `<span class="legend-dot dot-disconnected"></span><strong>Disconnected</strong> ${formatTimestampAndAgo(data.last_disconnected_at)}`;
         } else {
-          this.statusTimeline.innerHTML = `🔴 <strong>Link Down / Hunting</strong>`;
+          this.statusTimeline.innerHTML = `<span class="legend-dot dot-disconnected"></span><strong>Link down / hunting</strong>`;
         }
       } else {
-        this.statusTimeline.innerHTML = `⚪ Checking status...`;
+        this.statusTimeline.innerHTML = `Checking status...`;
       }
     }
 
@@ -511,6 +504,7 @@ class AutoWGApp {
       this.iptablesSubtext.textContent = 'Disabled / Non-Linux';
     }
     this.iptablesRange.textContent = data.local_port_range || '--';
+    this.renderObfuscation(fullData.obfuscation && fullData.obfuscation[data.interface]);
     this.tunnelPingTarget.textContent = data.in_tunnel_ping_target || 'Auto-detecting...';
     if (!data.ping_enabled) {
       this.failedPingsCount.textContent = 'Disabled';
@@ -531,6 +525,19 @@ class AutoWGApp {
 
     // Connection Events History
     this.renderEvents(data.events);
+  }
+
+  renderObfuscation(o) {
+    if (!this.obfsState) return;
+    if (!o || !o.active) {
+      this.obfsState.textContent = 'Off';
+      this.obfsState.style.color = 'var(--text-muted)';
+      return;
+    }
+    const parts = [`${o.handshakes} handshakes`, `${o.decoys} decoys`];
+    if (o.fragmented) parts.push(`${o.fragmented} fragmented`);
+    this.obfsState.textContent = `On · ${parts.join(', ')}`;
+    this.obfsState.style.color = 'var(--success)';
   }
 
   renderTunnelSwitcher(fullData) {
@@ -573,7 +580,7 @@ class AutoWGApp {
         if (this.selectedTunnel && this.selectedTunnel !== fullData.active_tunnel) {
           const btnSwitch = document.createElement('button');
           btnSwitch.className = 'btn btn-sm btn-accent';
-          btnSwitch.textContent = `🔀 Set ${this.selectedTunnel} as Active Route`;
+          btnSwitch.textContent = `Set ${this.selectedTunnel} as active route`;
           btnSwitch.addEventListener('click', async () => {
             btnSwitch.disabled = true;
             try {
@@ -859,23 +866,6 @@ class AutoWGApp {
       });
     }
 
-    // Form: Collapsible Shell Hooks & Web Settings
-    if (this.headerShellHooks && this.bodyShellHooks) {
-      this.headerShellHooks.addEventListener('click', () => {
-        const isCollapsed = this.bodyShellHooks.classList.contains('collapsed');
-        this.bodyShellHooks.classList.toggle('collapsed', !isCollapsed);
-        if (this.toggleIconShell) this.toggleIconShell.textContent = isCollapsed ? '▲' : '▼';
-      });
-    }
-
-    if (this.headerWebSettings && this.bodyWebSettings) {
-      this.headerWebSettings.addEventListener('click', () => {
-        const isCollapsed = this.bodyWebSettings.classList.contains('collapsed');
-        this.bodyWebSettings.classList.toggle('collapsed', !isCollapsed);
-        if (this.toggleIconWeb) this.toggleIconWeb.textContent = isCollapsed ? '▲' : '▼';
-      });
-    }
-
     // Form: Add Tunnel Button
     if (this.btnAddTunnel) {
       this.btnAddTunnel.addEventListener('click', () => {
@@ -889,7 +879,8 @@ class AutoWGApp {
           hunting: true,
           iptables: true,
           target_ips: [],
-          tunnel_ping: { enabled: false, target_ip: '', interval: '2s', failure_threshold: 3 }
+          tunnel_ping: { enabled: false, target_ip: '', interval: '2s', failure_threshold: 3 },
+          obfuscation: { enabled: false }
         }, true);
         this.onConfigFormChange();
       });
@@ -976,15 +967,6 @@ class AutoWGApp {
             this.showToast('Path: ' + path);
           }
         }
-      });
-    }
-
-    // Toggle help card
-    if (this.btnToggleHelp && this.configHelpContent) {
-      this.btnToggleHelp.addEventListener('click', () => {
-        const isHidden = this.configHelpContent.style.display === 'none';
-        this.configHelpContent.style.display = isHidden ? 'block' : 'none';
-        this.btnToggleHelp.textContent = isHidden ? 'Hide Tips' : 'Toggle Tips';
       });
     }
   }
@@ -1106,151 +1088,104 @@ class AutoWGApp {
   addTunnelCard(tunnel = {}, isNew = false) {
     if (!this.tunnelCardsContainer) return;
 
-    const card = document.createElement('div');
+    const isFirst = this.tunnelCardsContainer.children.length === 0;
+    const card = document.createElement('details');
     card.className = 'tunnel-form-card';
+    if (isNew || isFirst) card.open = true;
 
     const targetIPs = (tunnel.target_ips && tunnel.target_ips.length > 0)
       ? tunnel.target_ips
       : (tunnel.target_ip ? [tunnel.target_ip] : []);
-    const targetIPsText = targetIPs.join('\n');
 
     const isHunting = tunnel.hunting !== false;
     const isIptables = tunnel.iptables !== false;
+    const ping = tunnel.tunnel_ping || {};
+    const ob = tunnel.obfuscation || {};
+    const obNum = (v, def) => (Number.isFinite(v) ? v : def);
+    const text = (cls, value, placeholder = '') =>
+      `<input type="text" class="form-input ${cls}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" spellcheck="false">`;
+    const num = (cls, value, placeholder = '') =>
+      `<input type="number" class="form-input ${cls}" value="${value}" placeholder="${escapeHtml(placeholder)}" min="0">`;
+    const area = (cls, value, rows, placeholder = '') =>
+      `<textarea class="form-textarea ${cls}" rows="${rows}" placeholder="${escapeHtml(placeholder)}" spellcheck="false">${escapeHtml(value)}</textarea>`;
 
     card.innerHTML = `
-      <div class="tunnel-card-header">
-        <div class="tunnel-card-left">
-          <span class="tunnel-card-title">${escapeHtml(tunnel.interface || 'new_wg')}</span>
-          <span class="badge-count tunnel-card-name-tag">${escapeHtml(tunnel.name || '')}</span>
-          <span class="tunnel-card-badge ${isHunting ? 'hunting' : 'passive'}">
-            ${isHunting ? 'Hunting Active' : 'Passive (No Rotation)'}
-          </span>
-        </div>
-        <button type="button" class="btn-danger-sm btn-remove-tunnel" title="Remove this tunnel interface">✕ Remove</button>
-      </div>
+      <summary class="tunnel-card-header">
+        <span class="tunnel-card-title">${escapeHtml(tunnel.interface || 'new_wg')}</span>
+        <span class="tunnel-card-name-tag">${escapeHtml(tunnel.name || '')}</span>
+        <span class="tunnel-card-badge ${isHunting ? 'hunting' : 'passive'}">${isHunting ? 'Hunting' : 'Passive'}</span>
+        <button type="button" class="btn-danger-sm btn-remove-tunnel" title="Remove this tunnel">Remove</button>
+      </summary>
 
-      <div class="form-grid-2">
-        <div class="form-group">
-          <label class="form-label">WireGuard Interface Name <span style="color:var(--danger)">*</span></label>
-          <input type="text" class="form-input t-interface" value="${escapeHtml(tunnel.interface || '')}" placeholder="e.g. wg0 or wgBridge0" required spellcheck="false">
-          <span class="form-hint">Matches system interface name (ip link show)</span>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Descriptive Name</label>
-          <input type="text" class="form-input t-name" value="${escapeHtml(tunnel.name || '')}" placeholder="e.g. Frankfurt-VPS or Client-A" spellcheck="false">
-          <span class="form-hint">Display name shown in web dashboard & logs</span>
-        </div>
-      </div>
-
-      <div class="form-grid-2">
-        <div class="form-group">
-          <label class="form-label">Local Forwarded Port Range</label>
-          <input type="text" class="form-input t-port-range" value="${escapeHtml(tunnel.port_range || '20000-30000')}" placeholder="20000-30000" spellcheck="false">
-          <span class="form-hint">Range redirected by iptables to local WG listen port</span>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Remote Peer Port Range</label>
-          <input type="text" class="form-input t-remote-port-range" value="${escapeHtml(tunnel.remote_port_range || '20000-30000')}" placeholder="20000-30000" spellcheck="false">
-          <span class="form-hint">Candidate destination ports probed when connection stalls</span>
-        </div>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">Target Destination IPs / Hostnames (Dual-Stack IPv4 / IPv6 / Domains)</label>
-        <textarea class="form-textarea t-target-ips" rows="2" placeholder="198.51.100.1&#10;2001:db8::1&#10;vps.example.com" spellcheck="false">${escapeHtml(targetIPsText)}</textarea>
-        <span class="form-hint">One destination per line. Auto-WG rotates through IPv4 and IPv6 targets if DPI blocks one. Domains are resolved on each hunt attempt.</span>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">Peer Public Key (optional)</label>
-        <input type="text" class="form-input t-peer-pubkey" value="${escapeHtml(tunnel.peer_public_key || '')}" placeholder="Base64 WireGuard peer public key" spellcheck="false">
-        <span class="form-hint">Auto-detected from interface if left blank</span>
-      </div>
-
-      <div class="tunnel-card-toggles">
-        <label class="switch-label">
-          <input type="checkbox" class="t-hunting" ${isHunting ? 'checked' : ''}>
-          <span class="switch-slider"></span>
-          <span class="switch-text">Autonomous Port Hunting (active port rotation on stall)</span>
-        </label>
-        <label class="switch-label">
-          <input type="checkbox" class="t-iptables" ${isIptables ? 'checked' : ''}>
-          <span class="switch-slider"></span>
-          <span class="switch-text">Manage iptables REDIRECT NAT rule</span>
-        </label>
-      </div>
-
-      <!-- Collapsible Advanced & Ping Settings -->
-      <div class="tunnel-advanced-box">
-        <div class="tunnel-advanced-header">
-          <span>▶ Advanced & In-Tunnel Ping Settings</span>
-          <span class="advanced-toggle-icon">▼</span>
-        </div>
-        <div class="tunnel-advanced-body collapsed">
-          <div class="form-sub-header">
-            <h4>In-Tunnel ICMP Ping (Fast Link Failure Detection)</h4>
-            <label class="switch-label">
-              <input type="checkbox" class="t-ping-enabled" ${tunnel.tunnel_ping?.enabled ? 'checked' : ''}>
-              <span class="switch-slider"></span>
-              <span class="switch-text">Enable In-Tunnel Ping</span>
-            </label>
+      <div class="tunnel-body">
+        <div class="group">
+          <div class="group-label">Connection</div>
+          <div class="form-grid-2">
+            ${formField('Interface *', text('t-interface', tunnel.interface || '', 'wg0'), 'System interface name (ip link show)')}
+            ${formField('Name', text('t-name', tunnel.name || '', 'Frankfurt-VPS'), 'Shown in the dashboard and logs')}
+            ${formField('Local port range', text('t-port-range', tunnel.port_range || '20000-30000', '20000-30000'), 'Redirected to the WireGuard listen port')}
+            ${formField('Remote port range', text('t-remote-port-range', tunnel.remote_port_range || '20000-30000', '20000-30000'), 'Ports tried on the peer when the link stalls')}
           </div>
+          ${formField('Target IPs / hostnames', area('t-target-ips', targetIPs.join('\n'), 2, '198.51.100.1\n2001:db8::1\nvps.example.com'), 'One per line, IPv4, IPv6 or domains. Rotated when one is blocked; domains are re-resolved on every hunt.')}
+          ${formField('Peer public key', text('t-peer-pubkey', tunnel.peer_public_key || '', 'Optional'), 'Detected from the interface when empty')}
+          <div class="toggle-row">
+            ${formToggle('t-hunting', isHunting, 'Rotate ports automatically when the link stalls')}
+            ${formToggle('t-iptables', isIptables, 'Manage the iptables REDIRECT rule')}
+          </div>
+        </div>
 
-          <div class="form-grid-3">
-            <div class="form-group">
-              <label class="form-label">Ping Target IP</label>
-              <input type="text" class="form-input t-ping-target" value="${escapeHtml(tunnel.tunnel_ping?.target_ip || '')}" placeholder="e.g. 10.100.0.1" spellcheck="false">
-              <span class="form-hint">In-tunnel IP of peer</span>
+        <div class="group group-obfs ${ob.enabled ? '' : 'off'}">
+          <div class="group-label">
+            Handshake obfuscation
+            ${formToggle('t-obfs-enabled', !!ob.enabled, 'Enabled')}
+          </div>
+          <p class="group-note">Linux only. Hides the 148-byte initiation and 92-byte response from DPI by sending decoys first and optionally fragmenting the real packet. The peer needs no changes.</p>
+          <div class="group-fields">
+            <div class="form-grid-3">
+              ${formField('Decoys per handshake', num('t-obfs-decoys', obNum(ob.decoys, 3), '3'))}
+              ${formField('Decoy size min (bytes)', num('t-obfs-min', obNum(ob.decoy_min_size, 40), '40'))}
+              ${formField('Decoy size max (bytes)', num('t-obfs-max', obNum(ob.decoy_max_size, 120), '120'))}
+              ${formField('Decoy TTL', num('t-obfs-ttl', obNum(ob.decoy_ttl, 0), '0'), '0 = same as the real packet. A low value (e.g. 4) makes decoys expire before the server.')}
+              ${formField('Delay (ms)', num('t-obfs-delay', obNum(ob.delay_ms, 0), '0'), 'Pause between decoys and the real packet')}
+              ${formField('Fragment split (bytes)', num('t-obfs-split', obNum(ob.fragment_split, 8), '8'), 'Multiple of 8. 8 puts only the UDP header in the first fragment.')}
             </div>
-            <div class="form-group">
-              <label class="form-label">Ping Interval</label>
-              <input type="text" class="form-input t-ping-interval" value="${escapeHtml(formatDuration(tunnel.tunnel_ping?.interval, '2s'))}" placeholder="2s" spellcheck="false">
-            </div>
-            <div class="form-group">
-              <label class="form-label">Failure Threshold</label>
-              <input type="number" class="form-input t-ping-threshold" value="${tunnel.tunnel_ping?.failure_threshold || 3}" placeholder="3">
-              <span class="form-hint">Consecutive failed pings before hunt</span>
+            <div class="toggle-row">
+              ${formToggle('t-obfs-badsum', !!ob.decoy_bad_checksum, 'Corrupt decoy checksum (the server drops them, DPI still sees them)')}
+              ${formToggle('t-obfs-fragment', !!ob.fragment, 'Send the handshake as IPv4 fragments')}
             </div>
           </div>
+        </div>
 
-          <div class="form-sub-header" style="margin-top: 10px;">
-            <h4>Timing & Timeouts</h4>
+        <div class="group group-ping ${ping.enabled ? '' : 'off'}">
+          <div class="group-label">
+            Health check
+            ${formToggle('t-ping-enabled', !!ping.enabled, 'In-tunnel ping')}
+          </div>
+          <div class="group-fields">
+            <div class="form-grid-3">
+              ${formField('Ping target', text('t-ping-target', ping.target_ip || '', '10.100.0.1'), 'In-tunnel IP of the peer')}
+              ${formField('Interval', text('t-ping-interval', formatDuration(ping.interval, '2s'), '2s'))}
+              ${formField('Failure threshold', num('t-ping-threshold', ping.failure_threshold || 3, '3'), 'Failed pings before a hunt')}
+            </div>
           </div>
           <div class="form-grid-3">
-            <div class="form-group">
-              <label class="form-label">Check Interval</label>
-              <input type="text" class="form-input t-check-interval" value="${escapeHtml(formatDuration(tunnel.check_interval, '3s'))}" placeholder="3s" spellcheck="false">
-            </div>
-            <div class="form-group">
-              <label class="form-label">Handshake Timeout</label>
-              <input type="text" class="form-input t-handshake-timeout" value="${escapeHtml(formatDuration(tunnel.handshake_timeout, '60s'))}" placeholder="60s" spellcheck="false">
-            </div>
-            <div class="form-group">
-              <label class="form-label">Stagger Cycle Timeout</label>
-              <input type="text" class="form-input t-cycle-timeout" value="${escapeHtml(formatDuration(tunnel.cycle_timeout, '8s'))}" placeholder="8s" spellcheck="false">
-            </div>
+            ${formField('Check interval', text('t-check-interval', formatDuration(tunnel.check_interval, '3s'), '3s'))}
+            ${formField('Handshake timeout', text('t-handshake-timeout', formatDuration(tunnel.handshake_timeout, '60s'), '60s'))}
+            ${formField('Stagger cycle', text('t-cycle-timeout', formatDuration(tunnel.cycle_timeout, '8s'), '8s'))}
           </div>
+        </div>
 
-          <div class="form-group" style="margin-top: 6px;">
-            <label class="form-label">Persistent History File</label>
-            <input type="text" class="form-input t-history-file" value="${escapeHtml(tunnel.history_file || '')}" placeholder="Leave empty for default or 'off' to disable" spellcheck="false">
-          </div>
-
-          <div class="form-grid-2" style="margin-top: 6px;">
-            <div class="form-group">
-              <label class="form-label">Tunnel Post-Up Shell Commands (one per line)</label>
-              <textarea class="form-textarea t-post-up" rows="2" placeholder="e.g. iptables -t nat -I POSTROUTING ..." spellcheck="false">${escapeHtml((tunnel.post_up || []).join('\n'))}</textarea>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Tunnel Pre-Down Shell Commands (one per line)</label>
-              <textarea class="form-textarea t-pre-down" rows="2" placeholder="e.g. iptables -t nat -D POSTROUTING ..." spellcheck="false">${escapeHtml((tunnel.pre_down || []).join('\n'))}</textarea>
-            </div>
+        <div class="group">
+          <div class="group-label">Advanced</div>
+          ${formField('History file', text('t-history-file', tunnel.history_file || '', 'Default, or "off" to disable'))}
+          <div class="form-grid-2">
+            ${formField('Post-up commands', area('t-post-up', (tunnel.post_up || []).join('\n'), 2, 'One per line'))}
+            ${formField('Pre-down commands', area('t-pre-down', (tunnel.pre_down || []).join('\n'), 2, 'One per line'))}
           </div>
         </div>
       </div>
     `;
 
-    // Interactive element wiring within the card
     const ifaceInput = card.querySelector('.t-interface');
     const nameInput = card.querySelector('.t-name');
     const titleEl = card.querySelector('.tunnel-card-title');
@@ -1265,30 +1200,25 @@ class AutoWGApp {
       if (nameTagEl) nameTagEl.textContent = nameInput.value;
     });
     huntingInput?.addEventListener('change', () => {
-      if (badgeEl) {
-        if (huntingInput.checked) {
-          badgeEl.textContent = 'Hunting Active';
-          badgeEl.className = 'tunnel-card-badge hunting';
-        } else {
-          badgeEl.textContent = 'Passive (No Rotation)';
-          badgeEl.className = 'tunnel-card-badge passive';
-        }
-      }
+      if (!badgeEl) return;
+      badgeEl.textContent = huntingInput.checked ? 'Hunting' : 'Passive';
+      badgeEl.className = `tunnel-card-badge ${huntingInput.checked ? 'hunting' : 'passive'}`;
     });
 
-    // Advanced accordion toggle
-    const advHeader = card.querySelector('.tunnel-advanced-header');
-    const advBody = card.querySelector('.tunnel-advanced-body');
-    const advIcon = card.querySelector('.advanced-toggle-icon');
-    advHeader?.addEventListener('click', () => {
-      const isCollapsed = advBody.classList.contains('collapsed');
-      advBody.classList.toggle('collapsed', !isCollapsed);
-      if (advIcon) advIcon.textContent = isCollapsed ? '▲' : '▼';
-    });
+    // Dim a group's fields while its master switch is off
+    const bindGroupSwitch = (switchSel, groupSel) => {
+      const sw = card.querySelector(switchSel);
+      const group = card.querySelector(groupSel);
+      sw?.addEventListener('change', () => group?.classList.toggle('off', !sw.checked));
+    };
+    bindGroupSwitch('.t-obfs-enabled', '.group-obfs');
+    bindGroupSwitch('.t-ping-enabled', '.group-ping');
 
-    // Remove tunnel button
+    // Remove lives inside <summary>, so keep the click from folding the card
     const btnRemove = card.querySelector('.btn-remove-tunnel');
-    btnRemove?.addEventListener('click', () => {
+    btnRemove?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       const iface = ifaceInput?.value.trim() || 'this tunnel';
       if (confirm(`Remove interface "${iface}" from configuration?`)) {
         card.remove();
@@ -1340,6 +1270,22 @@ class AutoWGApp {
       const cycleTimeout = card.querySelector('.t-cycle-timeout')?.value.trim() || '8s';
       const historyFile = card.querySelector('.t-history-file')?.value.trim() || '';
 
+      const intVal = (sel, def) => {
+        const n = parseInt(card.querySelector(sel)?.value, 10);
+        return Number.isNaN(n) ? def : n;
+      };
+      const obfuscation = {
+        enabled: card.querySelector('.t-obfs-enabled')?.checked ?? false,
+        decoys: intVal('.t-obfs-decoys', 3),
+        decoy_min_size: intVal('.t-obfs-min', 40),
+        decoy_max_size: intVal('.t-obfs-max', 120),
+        decoy_ttl: intVal('.t-obfs-ttl', 0),
+        decoy_bad_checksum: card.querySelector('.t-obfs-badsum')?.checked ?? false,
+        delay_ms: intVal('.t-obfs-delay', 0),
+        fragment: card.querySelector('.t-obfs-fragment')?.checked ?? false,
+        fragment_split: intVal('.t-obfs-split', 8)
+      };
+
       const postUpRaw = card.querySelector('.t-post-up')?.value || '';
       const postUp = postUpRaw.split('\n').map(s => s.trim()).filter(s => s.length > 0);
       const preDownRaw = card.querySelector('.t-pre-down')?.value || '';
@@ -1363,7 +1309,8 @@ class AutoWGApp {
           target_ip: pingTarget,
           interval: pingInterval,
           failure_threshold: pingThreshold
-        }
+        },
+        obfuscation: obfuscation
       };
       if (historyFile) tunnelObj.history_file = historyFile;
       if (postUp.length > 0) tunnelObj.post_up = postUp;
@@ -1450,6 +1397,20 @@ class AutoWGApp {
         if (t.tunnel_ping.target_ip) lines.push(`      target_ip: "${t.tunnel_ping.target_ip}"`);
         if (t.tunnel_ping.interval) lines.push(`      interval: "${t.tunnel_ping.interval}"`);
         if (t.tunnel_ping.failure_threshold) lines.push(`      failure_threshold: ${t.tunnel_ping.failure_threshold}`);
+      }
+
+      const o = t.obfuscation;
+      if (o && (o.enabled || !isDefaultObfuscation(o))) {
+        lines.push('    obfuscation:');
+        lines.push(`      enabled: ${o.enabled ? 'true' : 'false'}`);
+        lines.push(`      decoys: ${o.decoys}`);
+        lines.push(`      decoy_min_size: ${o.decoy_min_size}`);
+        lines.push(`      decoy_max_size: ${o.decoy_max_size}`);
+        lines.push(`      decoy_ttl: ${o.decoy_ttl}`);
+        lines.push(`      decoy_bad_checksum: ${o.decoy_bad_checksum ? 'true' : 'false'}`);
+        lines.push(`      delay_ms: ${o.delay_ms}`);
+        lines.push(`      fragment: ${o.fragment ? 'true' : 'false'}`);
+        lines.push(`      fragment_split: ${o.fragment_split}`);
       }
 
       if (t.check_interval && t.check_interval !== '3s') lines.push(`    check_interval: "${t.check_interval}"`);
@@ -1693,6 +1654,20 @@ function formatTimestampAndAgo(isoString) {
   const hours = Math.floor(diffSec / 3600);
   const mins = Math.floor((diffSec % 3600) / 60);
   return `${hours}h ${mins}m ago (${timeStr})`;
+}
+
+function formField(label, control, hint = '') {
+  return `<div class="form-group"><label class="form-label">${label}</label>${control}${hint ? `<span class="form-hint">${hint}</span>` : ''}</div>`;
+}
+
+function formToggle(cls, checked, text) {
+  return `<label class="switch-label"><input type="checkbox" class="${cls}" ${checked ? 'checked' : ''}><span class="switch-slider"></span><span class="switch-text">${text}</span></label>`;
+}
+
+// True when every obfuscation setting is still at its default, so a disabled block can be left out of the YAML.
+function isDefaultObfuscation(o) {
+  return o.decoys === 3 && o.decoy_min_size === 40 && o.decoy_max_size === 120 && o.decoy_ttl === 0 &&
+    !o.decoy_bad_checksum && o.delay_ms === 0 && !o.fragment && o.fragment_split === 8;
 }
 
 function escapeHtml(str) {

@@ -21,6 +21,7 @@ Auto-WG natively supports two primary deployment topologies:
 * **Automatic Peer Discovery**: Auto-WG queries each WireGuard interface and automatically extracts the single peer's public key, current endpoint, and handshake statistics directly from the kernel.
 * **Deterministic Anti-Collision Staggering**: Uses public key lexicographical comparison (`localPubKey < peerPubKey`) to coordinate turn-taking windows (e.g. 8s cycle) so peers do not collide or flap while hunting.
 * **Multi-Destination Dual-Stack Hunting (`target_ips`)**: Tunnels can specify multiple candidate destination endpoints (IPv4 & IPv6, or domain hostnames). If DPI blocks or throttles one address family, Auto-WG automatically round-robins between IPv4 and IPv6 during port hunting to punch through hostile firewalls.
+* **Handshake Obfuscation (Linux)**: DPI that fingerprints the 148-byte initiation and 92-byte response can be thrown off by sending decoy packets from the same 5-tuple before each handshake and, optionally, splitting the real packet into IPv4 fragments. Works on stock WireGuard; only the sender needs it. See [Handshake obfuscation](#-handshake-obfuscation).
 * **Integrated Web Dashboard & Public Status Page**: Modern, mobile-responsive web UI with multi-tunnel telemetry, active route indication, manual hunt/rebind triggers, live SSE logs, and an isolated bilingual (Persian & English) public status page.
 
 ---
@@ -246,6 +247,15 @@ sudo ./autowg --uninstall
 | `tunnel_ping.enabled` | bool | `true` | Active ICMP ping verification before hunting |
 | `tunnel_ping.target_ip` | string | `""` | In-tunnel IP of the remote peer to ping |
 | `tunnel_ping.failure_threshold` | int | `3` | Consecutive ping timeouts before declaring link down |
+| `obfuscation.enabled` | bool | `false` | Intercept outgoing handshakes via NFQUEUE and apply the options below (Linux, root) |
+| `obfuscation.decoys` | int | `3` | Junk UDP packets sent before every handshake packet (0-20) |
+| `obfuscation.decoy_min_size` / `decoy_max_size` | int | `40` / `120` | Decoy payload size range in bytes |
+| `obfuscation.decoy_ttl` | int | `0` | TTL of decoys; `0` keeps the real packet's TTL. A small value makes them expire before the server |
+| `obfuscation.decoy_bad_checksum` | bool | `false` | Corrupt the decoys' UDP checksum so the receiving stack drops them while DPI still sees them |
+| `obfuscation.delay_ms` | int | `0` | Pause between the decoys and the real packet |
+| `obfuscation.fragment` | bool | `false` | Send the real handshake as two IPv4 fragments (IPv6 is left untouched) |
+| `obfuscation.fragment_split` | int | `8` | Bytes of the UDP datagram in the first fragment, multiple of 8. `8` carries only the UDP header |
+| `obfuscation.queue_num` | int | auto | NFQUEUE number (auto-assigned from 4200) |
 | `history_file` | string | `""` | Persistent history file path (e.g. `"history-wg0.json"`, or `"off"` to disable) |
 | `post_up` | list of string | `[]` | Tunnel-specific shell commands executed after this interface starts |
 | `pre_down` | list of string | `[]` | Tunnel-specific shell commands executed before this interface stops |
@@ -268,6 +278,36 @@ sudo ./autowg --uninstall
 | `status_page.https` | bool | `false` | Enable TLS/HTTPS for status page |
 | `status_page.cert_file` | string | `""` | SSL certificate PEM path |
 | `status_page.key_file` | string | `""` | SSL private key PEM path |
+
+---
+
+## 🛡️ Handshake obfuscation
+
+WireGuard handshake messages are authenticated, so they cannot be edited in flight, and the kernel module cannot be told to send different bytes. What can change is the traffic around them. With `obfuscation.enabled: true` Auto-WG:
+
+1. adds `mangle/OUTPUT` NFQUEUE rules (with `--queue-bypass`, so traffic flows normally if Auto-WG is not running) that match UDP from the tunnel's `port_range` with a total length of 176 or 120 bytes (196 or 140 for IPv6): exactly the 148-byte initiation and 92-byte response;
+2. holds each such packet, sends `decoys` junk packets from the same source and destination address and port through a raw socket, then releases the real one;
+3. optionally drops the real packet and sends it as two IPv4 fragments instead.
+
+The peer needs no changes: it drops the decoys and reassembles the fragments. Both directions are covered, so it also applies to the 92-byte response when this host is the server.
+
+```yaml
+tunnels:
+  - interface: "wg0"
+    port_range: "20000-24999"
+    obfuscation:
+      enabled: true
+      decoys: 3
+      decoy_ttl: 4          # hops to the DPI box; decoys expire before the server
+      fragment: true
+```
+
+Notes:
+
+* Requires Linux, root, the `nfnetlink_queue` and `xt_length` kernel modules, and `iptables`.
+* Decoys inherit the packet's firewall mark, so `wg-quick` style policy routing keeps working.
+* Fragments bypass connection tracking, so Auto-WG looks up the port a `REDIRECT` rule would have restored in `/proc/net/nf_conntrack` and writes it into the fragments. If that cannot be determined for a response, that packet is sent unfragmented.
+* This raises the cost of fingerprinting; it is not a guarantee. If decoys alone are not enough, try `fragment: true`, then tune `decoy_ttl` to the hop count of the DPI box.
 
 ---
 

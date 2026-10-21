@@ -15,6 +15,7 @@ import (
 	"auto-wg/pkg/hunter"
 	"auto-wg/pkg/iptables"
 	"auto-wg/pkg/logger"
+	"auto-wg/pkg/obfs"
 	"auto-wg/pkg/wg"
 )
 
@@ -26,6 +27,7 @@ type SupervisorStatus struct {
 	Routing      config.RoutingConfig           `json:"routing"`
 	Tunnels      map[string]hunter.StatusReport `json:"tunnels"`
 	TunnelOrder  []string                       `json:"tunnel_order"`
+	Obfuscation  map[string]obfs.Status         `json:"obfuscation,omitempty"`
 }
 
 type Supervisor struct {
@@ -39,6 +41,7 @@ type Supervisor struct {
 	tunnelOrder   []string
 	hunterCancels map[string]context.CancelFunc
 	routeManager  *RouteManager
+	obfs          *obfs.Manager
 	ctx           context.Context
 }
 
@@ -60,6 +63,7 @@ func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *ipta
 		hunters:       make(map[string]*hunter.Hunter),
 		tunnelOrder:   make([]string, 0, len(cfg.Tunnels)),
 		hunterCancels: make(map[string]context.CancelFunc),
+		obfs:          obfs.NewManager(iptMgr, log),
 	}
 
 	cfgDir := filepath.Dir(cfgPath)
@@ -126,6 +130,8 @@ func (s *Supervisor) Start(ctx context.Context) {
 			}
 		}
 
+		s.obfs.Apply(tCfg)
+
 		wgGroup.Add(1)
 		hCtx, hCancel := context.WithCancel(ctx)
 		s.hunterCancels[iface] = hCancel
@@ -166,7 +172,8 @@ func (s *Supervisor) Start(ctx context.Context) {
 		}
 	}
 
-	// 6. Remove all iptables forwarding rules
+	// 6. Stop handshake obfuscation and remove all iptables forwarding rules
+	s.obfs.Close()
 	if s.iptMgr != nil {
 		_ = s.iptMgr.RemoveAllRules()
 	}
@@ -238,6 +245,7 @@ func (s *Supervisor) GetStatus() SupervisorStatus {
 		Routing:      s.cfg.Routing,
 		Tunnels:      reports,
 		TunnelOrder:  orderCopy,
+		Obfuscation:  s.obfs.Status(),
 	}
 }
 
@@ -428,6 +436,7 @@ func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) 
 				delete(s.hunterCancels, iface)
 			}
 			_ = h.SaveHistory()
+			s.obfs.Remove(iface)
 			if s.iptMgr != nil {
 				_ = s.iptMgr.RemoveRule(iface)
 			}
@@ -437,6 +446,7 @@ func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) 
 
 	// 5. Update existing tunnels or start newly added ones
 	for _, t := range newCfg.Tunnels {
+		s.obfs.Apply(t)
 		if h, exists := s.hunters[t.Interface]; exists {
 			h.UpdateConfig(t)
 		} else {
