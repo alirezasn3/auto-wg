@@ -388,6 +388,59 @@ func TestUpdateConfigTargetIPs(t *testing.T) {
 	}
 }
 
+func TestHealthCheckStatusPingFields(t *testing.T) {
+	log := logger.New(io.Discard, logger.LevelDebug, 100)
+	wgCtrl, _ := wg.NewController(log)
+	iptMgr := iptables.NewManager(log)
+
+	tunnelCfg := config.TunnelConfig{
+		Interface:       "wg0",
+		TargetIPs:       []string{"198.51.100.1"},
+		PortRange:       "20000-24999",
+		RemotePortRange: "25000-29999",
+		HistoryFile:     "off",
+		TunnelPing: config.TunnelPingConfig{
+			Enabled:          true,
+			TargetIP:         "10.0.0.1",
+			FailureThreshold: 3,
+		},
+	}
+
+	h := New(tunnelCfg, wgCtrl, iptMgr, log, nil)
+	st := h.GetStatus()
+	if !st.PingEnabled {
+		t.Errorf("expected PingEnabled true, got false")
+	}
+	if st.PingVerified {
+		t.Errorf("expected PingVerified false before verification, got true")
+	}
+	if st.InTunnelPingTarget != "10.0.0.1" {
+		t.Errorf("expected InTunnelPingTarget 10.0.0.1, got %s", st.InTunnelPingTarget)
+	}
+}
+
+func TestHealthCheckRequiresHandshake(t *testing.T) {
+	log := logger.New(io.Discard, logger.LevelDebug, 100)
+	wgCtrl, _ := wg.NewController(log)
+	iptMgr := iptables.NewManager(log)
+
+	tunnelCfg := config.TunnelConfig{
+		Interface:       "wg0",
+		TargetIPs:       []string{"198.51.100.1"},
+		PortRange:       "20000-24999",
+		RemotePortRange: "25000-29999",
+		HistoryFile:     "off",
+		CheckInterval:   100 * time.Millisecond,
+		HandshakeTimeout: 10 * time.Second,
+	}
+
+	h := New(tunnelCfg, wgCtrl, iptMgr, log, nil)
+	// Without any handshake, state should remain Unknown or Hunting, never Connected
+	if h.GetState() == StateConnected {
+		t.Errorf("tunnel must not be connected when LastHandshake is zero")
+	}
+}
+
 
 
 

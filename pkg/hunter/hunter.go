@@ -66,6 +66,8 @@ type StatusReport struct {
 	SuccessfulHunts    int64             `json:"successful_hunts"`
 	CurrentAttempt     int               `json:"current_attempt"`
 	FailedPings        int               `json:"failed_pings"`
+	PingVerified       bool              `json:"ping_verified"`
+	PingEnabled        bool              `json:"ping_enabled"`
 	LastHuntTime       time.Time         `json:"last_hunt_time"`
 	LastHuntReason     string            `json:"last_hunt_reason"`
 	IptablesActive     bool              `json:"iptables_active"`
@@ -123,6 +125,7 @@ type Hunter struct {
 	rxBytes              int64
 	lastRxBytes          int64
 	failedPings          int
+	pingVerified         bool
 	totalHunts           int64
 	successfulHunts      int64
 	currentAttempt       int
@@ -192,6 +195,7 @@ func New(tunnelCfg config.TunnelConfig, wgCtrl *wg.Controller, iptMgr *iptables.
 		targetIPs:         resolved,
 		targetIPIndex:     0,
 		configuredTargets: rawTargets,
+		pingTarget:        strings.TrimSpace(tunnelCfg.TunnelPing.TargetIP),
 		lastDirection:     "Local ⇄ Remote",
 		events:            make([]ConnectionEvent, 0, 50),
 		manualTrigger:     make(chan string, 10),
@@ -588,12 +592,19 @@ func (h *Hunter) tick(ctx context.Context) {
 	// Determine in-tunnel ping target:
 	pingTarget := strings.TrimSpace(h.cfg.TunnelPing.TargetIP)
 	if pingTarget == "" && len(dev.PeerAllowedIPs) > 0 {
-		pingTarget = dev.PeerAllowedIPs[0]
+		for _, aip := range dev.PeerAllowedIPs {
+			clean := strings.TrimSpace(aip)
+			if clean != "" && clean != "0.0.0.0" && clean != "::" && !strings.HasSuffix(clean, ".0") {
+				pingTarget = clean
+				break
+			}
+		}
 	}
 	h.pingTarget = pingTarget
 
 	if h.peerPubKey == "" {
 		h.setState(StateUnknown)
+		h.pingVerified = false
 		h.mu.Unlock()
 		h.log.Warn("HUNTER", "[%s] No peer found on interface %s. Waiting for peer configuration...", iface, iface)
 		return
@@ -601,61 +612,81 @@ func (h *Hunter) tick(ctx context.Context) {
 
 	isPrimary := dev.PublicKey < dev.PeerPublicKey
 
-	// 2. Check if tunnel is healthy:
-	isHandshakeFresh := !dev.LastHandshake.IsZero() && dev.HandshakeAge <= timeout
+	hasHandshakeEver := !dev.LastHandshake.IsZero()
+	isHandshakeFresh := hasHandshakeEver && dev.HandshakeAge <= timeout
 
-	if isHandshakeFresh || rxProgress {
-		if h.state == StateHunting || h.state == StateStalled {
-			remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
-			h.log.Info("HUNTER", "===============================================================")
-			h.log.Info("HUNTER", " [%s] WIREGUARD CONNECTED! Working 5-tuple: :%d -> %s (Handshake: %v ago)",
-				iface, h.localPort, remoteEndpointStr, dev.HandshakeAge.Round(time.Millisecond))
-			h.log.Info("HUNTER", "===============================================================")
-			h.successfulHunts++
-			h.currentAttempt = 0
-
-			dir, init := h.determineDirection(dev.PeerPort)
-			h.lastDirection = dir
-			var downtimeSec float64
-			if !h.lastDisconnectedAt.IsZero() {
-				downtimeSec = time.Since(h.lastDisconnectedAt).Seconds()
-			}
-			h.lastConnectedAt = time.Now()
-			h.addEvent(StateConnected, dir, init, fmt.Sprintf("5-tuple: :%d -> %s", h.localPort, remoteEndpointStr), downtimeSec)
-		} else if h.lastConnectedAt.IsZero() {
-			if !dev.LastHandshake.IsZero() {
-				h.lastConnectedAt = dev.LastHandshake
-			} else {
-				h.lastConnectedAt = time.Now()
-			}
-			dir := "Local ⇄ Remote"
-			h.lastDirection = dir
-			remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
-			h.log.Info("HUNTER", "[%s] Tunnel healthy & active: :%d -> %s (Handshake: %v ago)",
-				iface, h.localPort, remoteEndpointStr, dev.HandshakeAge.Round(time.Millisecond))
-			h.addEvent(StateConnected, dir, "Initial Handshake", fmt.Sprintf("Link active: :%d -> %s", h.localPort, remoteEndpointStr), 0)
-		}
-		h.setState(StateConnected)
-		h.failedPings = 0
-		h.mu.Unlock()
-		return
-	}
-
-	// 3. Handshake is stale or zero, and no incoming RX packets.
+	// 2. Active In-Tunnel Ping Verification (if enabled)
 	if pingEnabled && pingTarget != "" {
-		h.mu.Unlock()
-		pingOK := ping.Ping(ctx, pingTarget, pingTimeout)
-		h.mu.Lock()
+		if hasHandshakeEver || rxProgress {
+			h.mu.Unlock()
+			pingOK := ping.Ping(ctx, pingTarget, pingTimeout)
+			h.mu.Lock()
 
-		if pingOK {
-			h.log.Debug("HUNTER", "[%s] Handshake stale (%v) but in-tunnel ping to %s succeeded; link is alive",
-				iface, dev.HandshakeAge.Round(time.Second), pingTarget)
-			h.failedPings = 0
+			if pingOK {
+				h.pingVerified = true
+				h.failedPings = 0
+				if h.state == StateHunting || h.state == StateStalled {
+					remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
+					h.log.Info("HUNTER", "===============================================================")
+					h.log.Info("HUNTER", " [%s] WIREGUARD CONNECTED! In-tunnel ping to %s verified (5-tuple: :%d -> %s)",
+						iface, pingTarget, h.localPort, remoteEndpointStr)
+					h.log.Info("HUNTER", "===============================================================")
+					h.successfulHunts++
+					h.currentAttempt = 0
+
+					dir, init := h.determineDirection(dev.PeerPort)
+					h.lastDirection = dir
+					var downtimeSec float64
+					if !h.lastDisconnectedAt.IsZero() {
+						downtimeSec = time.Since(h.lastDisconnectedAt).Seconds()
+					}
+					h.lastConnectedAt = time.Now()
+					h.addEvent(StateConnected, dir, init, fmt.Sprintf("Ping verified: :%d -> %s", h.localPort, remoteEndpointStr), downtimeSec)
+				} else if h.lastConnectedAt.IsZero() {
+					h.lastConnectedAt = time.Now()
+					dir := "Local ⇄ Remote"
+					h.lastDirection = dir
+					remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
+					h.addEvent(StateConnected, dir, "Initial Ping", fmt.Sprintf("Ping verified: :%d -> %s", h.localPort, remoteEndpointStr), 0)
+				}
+				h.setState(StateConnected)
+				h.mu.Unlock()
+				return
+			}
+
+			// In-tunnel ping failed
+			h.pingVerified = false
+			h.failedPings++
+			h.log.Warn("HUNTER", "[%s] In-tunnel ping #%d/%d to %s failed (handshake age: %v)",
+				iface, h.failedPings, threshold, pingTarget, dev.HandshakeAge.Round(time.Second))
+
+			if h.failedPings < threshold {
+				// In grace verification period, do not hunt yet!
+				if h.state == StateConnected || (h.state == StateUnknown && !h.lastConnectedAt.IsZero() && (h.lastDisconnectedAt.IsZero() || h.lastConnectedAt.After(h.lastDisconnectedAt))) {
+					h.lastDisconnectedAt = time.Now()
+					var uptimeSec float64
+					if !h.lastConnectedAt.IsZero() {
+						uptimeSec = time.Since(h.lastConnectedAt).Seconds()
+					}
+					h.addEvent(StateDisconnected, h.lastDirection, "", fmt.Sprintf("in-tunnel ping #%d/%d failed", h.failedPings, threshold), uptimeSec)
+				}
+				h.setState(StateStalled)
+				h.lastHuntReason = fmt.Sprintf("verifying_stalled_ping_%d/%d", h.failedPings, threshold)
+				h.mu.Unlock()
+				return
+			}
+		} else {
+			h.pingVerified = false
+		}
+	} else {
+		// Ping is disabled or no target: rely on passive WireGuard handshake & rxProgress
+		h.pingVerified = false
+		if isHandshakeFresh || (hasHandshakeEver && rxProgress) {
 			if h.state == StateHunting || h.state == StateStalled {
 				remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
 				h.log.Info("HUNTER", "===============================================================")
-				h.log.Info("HUNTER", " [%s] WIREGUARD CONNECTED! In-tunnel ping to %s verified (5-tuple: :%d -> %s)",
-					iface, pingTarget, h.localPort, remoteEndpointStr)
+				h.log.Info("HUNTER", " [%s] WIREGUARD CONNECTED! Working 5-tuple: :%d -> %s (Handshake: %v ago)",
+					iface, h.localPort, remoteEndpointStr, dev.HandshakeAge.Round(time.Millisecond))
 				h.log.Info("HUNTER", "===============================================================")
 				h.successfulHunts++
 				h.currentAttempt = 0
@@ -667,36 +698,22 @@ func (h *Hunter) tick(ctx context.Context) {
 					downtimeSec = time.Since(h.lastDisconnectedAt).Seconds()
 				}
 				h.lastConnectedAt = time.Now()
-				h.addEvent(StateConnected, dir, init, fmt.Sprintf("Ping verified: :%d -> %s", h.localPort, remoteEndpointStr), downtimeSec)
+				h.addEvent(StateConnected, dir, init, fmt.Sprintf("5-tuple: :%d -> %s", h.localPort, remoteEndpointStr), downtimeSec)
 			} else if h.lastConnectedAt.IsZero() {
-				h.lastConnectedAt = time.Now()
+				if !dev.LastHandshake.IsZero() {
+					h.lastConnectedAt = dev.LastHandshake
+				} else {
+					h.lastConnectedAt = time.Now()
+				}
 				dir := "Local ⇄ Remote"
 				h.lastDirection = dir
 				remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
-				h.addEvent(StateConnected, dir, "Initial Ping", fmt.Sprintf("Ping verified: :%d -> %s", h.localPort, remoteEndpointStr), 0)
+				h.log.Info("HUNTER", "[%s] Tunnel healthy & active: :%d -> %s (Handshake: %v ago)",
+					iface, h.localPort, remoteEndpointStr, dev.HandshakeAge.Round(time.Millisecond))
+				h.addEvent(StateConnected, dir, "Initial Handshake", fmt.Sprintf("Link active: :%d -> %s", h.localPort, remoteEndpointStr), 0)
 			}
 			h.setState(StateConnected)
-			h.mu.Unlock()
-			return
-		}
-
-		// In-tunnel ping failed
-		h.failedPings++
-		h.log.Warn("HUNTER", "[%s] Tunnel unresponsive: handshake age %v, in-tunnel ping #%d/%d to %s failed",
-			iface, dev.HandshakeAge.Round(time.Second), h.failedPings, threshold, pingTarget)
-
-		if h.failedPings < threshold {
-			// In grace verification period, do not hunt yet!
-			if h.state == StateConnected || (h.state == StateUnknown && !h.lastConnectedAt.IsZero() && (h.lastDisconnectedAt.IsZero() || h.lastConnectedAt.After(h.lastDisconnectedAt))) {
-				h.lastDisconnectedAt = time.Now()
-				var uptimeSec float64
-				if !h.lastConnectedAt.IsZero() {
-					uptimeSec = time.Since(h.lastConnectedAt).Seconds()
-				}
-				h.addEvent(StateDisconnected, h.lastDirection, "", fmt.Sprintf("in-tunnel ping #%d/%d failed", h.failedPings, threshold), uptimeSec)
-			}
-			h.setState(StateStalled)
-			h.lastHuntReason = fmt.Sprintf("verifying_stalled_ping_%d/%d", h.failedPings, threshold)
+			h.failedPings = 0
 			h.mu.Unlock()
 			return
 		}
@@ -797,6 +814,7 @@ func (h *Hunter) executeHunt(reason string) {
 	h.currentAttempt++
 	h.lastHuntTime = time.Now()
 	h.lastHuntReason = reason
+	h.pingVerified = false
 	attempt := h.currentAttempt
 
 	// Re-resolve candidate targets if empty
@@ -948,6 +966,7 @@ func (h *Hunter) TriggerRebind() error {
 
 	h.mu.Lock()
 	h.localPort = newPort
+	h.pingVerified = false
 	h.mu.Unlock()
 	return nil
 }
@@ -1002,6 +1021,8 @@ func (h *Hunter) GetStatus() StatusReport {
 		SuccessfulHunts:    h.successfulHunts,
 		CurrentAttempt:     h.currentAttempt,
 		FailedPings:        h.failedPings,
+		PingVerified:       h.pingVerified,
+		PingEnabled:        h.cfg.TunnelPing.Enabled,
 		LastHuntTime:       h.lastHuntTime,
 		LastHuntReason:     h.lastHuntReason,
 		IptablesActive:     h.iptablesActive,

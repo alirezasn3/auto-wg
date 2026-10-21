@@ -420,15 +420,21 @@ class AutoWGApp {
     }
 
     if (data.in_tunnel_ping_target) {
-      if (data.failed_pings > 0) {
-        this.pingStatus.textContent = `${data.in_tunnel_ping_target} (Retry #${data.failed_pings})`;
-        this.pingStatus.style.color = 'var(--warning)';
-      } else {
-        this.pingStatus.textContent = `${data.in_tunnel_ping_target} (OK)`;
+      if (!data.ping_enabled) {
+        this.pingStatus.textContent = `${data.in_tunnel_ping_target} (Disabled)`;
+        this.pingStatus.style.color = 'var(--text-muted)';
+      } else if (data.ping_verified) {
+        this.pingStatus.textContent = `${data.in_tunnel_ping_target} (Verified OK)`;
         this.pingStatus.style.color = 'var(--success)';
+      } else if (data.failed_pings > 0) {
+        this.pingStatus.textContent = `${data.in_tunnel_ping_target} (Unreachable #${data.failed_pings})`;
+        this.pingStatus.style.color = 'var(--danger)';
+      } else {
+        this.pingStatus.textContent = `${data.in_tunnel_ping_target} (Testing...)`;
+        this.pingStatus.style.color = 'var(--warning)';
       }
     } else {
-      this.pingStatus.textContent = 'Auto-detecting...';
+      this.pingStatus.textContent = data.ping_enabled ? 'No Ping Target' : 'Disabled';
       this.pingStatus.style.color = 'var(--text-muted)';
     }
 
@@ -506,7 +512,16 @@ class AutoWGApp {
     }
     this.iptablesRange.textContent = data.local_port_range || '--';
     this.tunnelPingTarget.textContent = data.in_tunnel_ping_target || 'Auto-detecting...';
-    this.failedPingsCount.textContent = `${data.failed_pings || 0} consecutive`;
+    if (!data.ping_enabled) {
+      this.failedPingsCount.textContent = 'Disabled';
+      this.failedPingsCount.style.color = 'var(--text-muted)';
+    } else if (data.ping_verified) {
+      this.failedPingsCount.textContent = '0 (Verified OK)';
+      this.failedPingsCount.style.color = 'var(--success)';
+    } else {
+      this.failedPingsCount.textContent = `${data.failed_pings || 0} failed`;
+      this.failedPingsCount.style.color = (data.failed_pings > 0) ? 'var(--danger)' : 'var(--warning)';
+    }
 
     // Traffic Card
     this.totalRx.textContent = formatBytes(data.receive_bytes);
