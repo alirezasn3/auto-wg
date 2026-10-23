@@ -255,6 +255,9 @@ sudo ./autowg --uninstall
 | `tls.remote_port_range` | string | tunnel `remote_port_range` | Peer's **TCP** range to dial |
 | `tls.fallback_after` | duration | `15s` | How long the active path must be dead before switching to the other |
 | `tls.dial_interval` | duration | `1s` | Pause between dial attempts while no TLS link is up |
+| `tls.health_interval` | duration | `3s` | Pause between health probes (ping/pong) on a live TLS link |
+| `tls.health_timeout` | duration | `2s` | How long a probe may stay unanswered |
+| `tls.health_failures` | int | `3` | Consecutive unanswered probes after which the connection is dropped and rebuilt |
 | `tls.relay_port` | int | `0` (auto) | Loopback UDP port WireGuard talks to while the TLS path is active |
 | `tls.sni` | string | `""` | Optional server name sent in the TLS handshake (also the certificate name) |
 | `tls.alpn` | list of string | `[]` | Optional ALPN protocols, e.g. `["h2", "http/1.1"]` |
@@ -403,11 +406,11 @@ tunnels:
 **How it works**
 
 * **Both peers listen and dial.** Each side opens a TCP listener on a random port of `tls.port_range` (the whole range is redirected to it by iptables, exactly like the UDP range) and keeps dialing a random port of the peer's `tls.remote_port_range`, from a random source port of its own range. Whichever connection comes up first is used, so it works when only one direction is reachable. If two connections come up at once, both sides keep the one the primary peer (the lower public key) dialed.
-* **The TLS link stays up in the background** (hot standby). While it is idle it only exchanges small keepalives.
+* **The TLS link stays up in the background** (hot standby), and its health is checked actively. A middlebox can let a TLS connection start (the handshake and the first packets go through) and then stall it, so a connection that is merely open proves nothing. Every new connection must first echo four probe frames, sized like WireGuard's initiation (148 bytes), response (92), keepalive (32) and a near-full packet, before it is used or counted as up. After that each side sends a ping of random size every `health_interval` (with jitter) and expects the peer to echo it; `health_failures` unanswered probes in a row drop the connection and a new one is built within `dial_interval`. Probes are a separate control frame type: they never reach WireGuard, and they share the TLS stream with the data, so a stalled stream fails them too. If WireGuard itself stays dead on a TLS link that still passes its probes (a middlebox singling out what WireGuard sends), the connection is rebuilt once halfway through `fallback_after` before the tunnel gives up on the path. The dashboard shows the round-trip time, lost probes and rebuilds.
 * **WireGuard talks to a loopback relay while the TLS path is active.** Switching paths is only a change of the peer endpoint (the real peer, or `127.0.0.1:<relay port>`); WireGuard sessions survive it, so there is no new handshake. It works the same for the `wireguard` and `amneziawg` backends.
 * **Sticky failover.** Neither path is preferred. After the active path has been dead for `fallback_after`, the tunnel switches to the other one (the direct path is also still hunted for new ports while it is the active one). If the TLS link drops while it is active, the tunnel goes back to direct after 3 seconds. Each peer decides on its own, and receiving works on both paths on both peers at all times, so one side's switch moves the other side's endpoint by WireGuard roaming.
 * **Authentication.** TLS 1.3 with an ephemeral self-signed certificate; the peers then prove knowledge of `tls.secret` with an HMAC bound to the TLS session, so the secret never appears on the wire or in the certificate and a proof cannot be replayed. Unauthenticated connections are closed within 5 seconds. `sni` and `alpn` only make the handshake resemble ordinary HTTPS; they do not imitate a browser's TLS fingerprint.
-* **Not wire-compatible** with `reverse-udp-over-tls`: this uses length-prefixed frames and has both peers dial.
+* **Not wire-compatible** with `reverse-udp-over-tls`: this uses length-prefixed frames and has both peers dial. Peers must run the same version: a peer that predates the health probes drops the connection when it receives one, so update both ends together (the direct path is unaffected meanwhile).
 
 **Notes**
 

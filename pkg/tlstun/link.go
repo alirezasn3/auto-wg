@@ -27,7 +27,20 @@ const (
 	maxPreAuth     = 16
 	resolveEvery   = 30 * time.Second
 	authLogEvery   = 10 * time.Second
+	ctrlQueueLen   = 64
+
+	// Defaults for hand-built configurations (tests); the real config always sets these.
+	defaultHealthInterval = 3 * time.Second
+	defaultHealthTimeout  = 2 * time.Second
+	defaultHealthFailures = 3
 )
+
+// verifyProbeSizes are the payload sizes of the probes every new connection must answer before it is
+// used. They match the sizes of WireGuard's fixed-size messages (148 initiation, 92 response, 32
+// keepalive) plus a near-full-size packet, so each probe makes a TLS record as large as the real packet
+// it stands for. A path that lets the first frames of a flow through and then stalls it, or one that
+// reacts to those record sizes, fails this right away instead of after the first real handshake.
+var verifyProbeSizes = []int{148, 92, 32, 1200}
 
 // conn is one authenticated TLS connection.
 type conn struct {
@@ -35,9 +48,15 @@ type conn struct {
 	dialed bool // we dialed it (as opposed to accepting it)
 	remote string
 	since  time.Time
-	sendQ  chan []byte
+	sendQ  chan []byte // WireGuard packets
+	ctrlQ  chan []byte // health probes and their echoes, sent ahead of data
+	pongs  chan uint64 // nonces of echoes received, for the prober
 	done   chan struct{}
 	once   sync.Once
+
+	verified atomic.Bool  // passed the verification probes; only then is the link used
+	rtt      atomic.Int64 // last probe round trip, nanoseconds
+	failures atomic.Int32 // consecutive unanswered probes
 }
 
 func newConn(tc *tls.Conn, dialed bool) *conn {
@@ -47,6 +66,8 @@ func newConn(tc *tls.Conn, dialed bool) *conn {
 		remote: tc.RemoteAddr().String(),
 		since:  time.Now(),
 		sendQ:  make(chan []byte, sendQueueLen),
+		ctrlQ:  make(chan []byte, ctrlQueueLen),
+		pongs:  make(chan uint64, 16),
 		done:   make(chan struct{}),
 	}
 }
@@ -79,6 +100,7 @@ func preferNew(cur, nw *conn, primary, known bool) bool {
 
 type linkStats struct {
 	rxBytes, txBytes, rxPkts, txPkts, dropped, dials, authFails atomic.Uint64
+	probes, probeFails, verifyFails, resets                     atomic.Uint64
 }
 
 // Link owns the TCP listener and the dial loop and keeps at most one live connection.
@@ -107,6 +129,9 @@ type Link struct {
 	lastErr      string
 	downSince    time.Time
 
+	// onInstalled is a test hook, called when a connection becomes the active one (before verification).
+	onInstalled atomic.Pointer[func(*conn)]
+
 	preauth chan struct{}
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -115,6 +140,15 @@ type Link struct {
 }
 
 func newLink(cfg config.TLSConfig, iface string, log *logger.Logger, onPacket func([]byte), redirect func(string, int) error) *Link {
+	if cfg.HealthInterval <= 0 {
+		cfg.HealthInterval = defaultHealthInterval
+	}
+	if cfg.HealthTimeout <= 0 {
+		cfg.HealthTimeout = defaultHealthTimeout
+	}
+	if cfg.HealthFailures <= 0 {
+		cfg.HealthFailures = defaultHealthFailures
+	}
 	return &Link{
 		cfg:      cfg,
 		iface:    iface,
@@ -400,7 +434,8 @@ func (l *Link) nextTarget() (string, bool) {
 	return l.resolved[l.targetIdx], true
 }
 
-// install makes c the active connection unless the tie-break prefers the one we already have.
+// install makes c the active connection unless the tie-break prefers the one we already have. The
+// connection is not used for traffic until the prober has verified it.
 func (l *Link) install(c *conn) {
 	l.mu.Lock()
 	cur := l.active.Load()
@@ -411,27 +446,53 @@ func (l *Link) install(c *conn) {
 		return
 	}
 	l.active.Store(c)
-	l.downSince = time.Time{}
-	l.lastErr = ""
 	l.mu.Unlock()
 
 	if cur != nil {
 		cur.close()
 		l.log.Info("TLS", "[%s] Replaced duplicate TLS connection with the one dialed by the primary peer", l.iface)
 	}
-	l.log.Info("TLS", "[%s] TLS link up: %s %s", l.iface, c.direction(), c.remote)
+	l.log.Debug("TLS", "[%s] TLS connection established (%s %s), verifying", l.iface, c.direction(), c.remote)
+	if f := l.onInstalled.Load(); f != nil {
+		(*f)(c)
+	}
 
-	l.wg.Add(2)
+	l.wg.Add(3)
 	go l.reader(c)
 	go l.writer(c)
+	go l.prober(c)
+}
+
+// markVerified turns an authenticated connection into the working link.
+func (l *Link) markVerified(c *conn) {
+	c.verified.Store(true)
+	l.mu.Lock()
+	if l.active.Load() == c {
+		l.downSince = time.Time{}
+		l.lastErr = ""
+	}
+	l.mu.Unlock()
+	l.log.Info("TLS", "[%s] TLS link up: %s %s (round trip %v)", l.iface, c.direction(), c.remote, fmtRTT(time.Duration(c.rtt.Load())))
+}
+
+// fmtRTT keeps sub-millisecond round trips (loopback, LAN) readable instead of rounding them to 0s.
+func fmtRTT(d time.Duration) time.Duration {
+	if d < time.Millisecond {
+		return d.Round(10 * time.Microsecond)
+	}
+	return d.Round(100 * time.Microsecond)
 }
 
 func (l *Link) dropped(c *conn) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.active.CompareAndSwap(c, nil) {
-		l.downSince = time.Now()
-		l.log.Info("TLS", "[%s] TLS link down (%s %s)", l.iface, c.direction(), c.remote)
+		if l.downSince.IsZero() {
+			l.downSince = time.Now()
+		}
+		if c.verified.Load() {
+			l.log.Info("TLS", "[%s] TLS link down (%s %s)", l.iface, c.direction(), c.remote)
+		}
 	}
 }
 
@@ -444,9 +505,13 @@ func (l *Link) reader(c *conn) {
 	buf := make([]byte, maxFrame)
 	for {
 		_ = c.tc.SetReadDeadline(time.Now().Add(readTimeout))
-		p, err := readFrame(c.tc, buf)
+		p, control, err := readFrame(c.tc, buf)
 		if err != nil {
 			return
+		}
+		if control {
+			l.handleControl(c, p)
+			continue
 		}
 		if len(p) == 0 {
 			continue
@@ -455,6 +520,29 @@ func (l *Link) reader(c *conn) {
 		l.st.rxPkts.Add(1)
 		if l.onPacket != nil {
 			l.onPacket(p)
+		}
+	}
+}
+
+// handleControl answers a ping with an identical pong and hands pongs to the prober.
+func (l *Link) handleControl(c *conn, p []byte) {
+	if len(p) < probeHeader {
+		return
+	}
+	switch p[0] {
+	case ctrlPing:
+		pong := append([]byte(nil), p...)
+		pong[0] = ctrlPong
+		select {
+		case c.ctrlQ <- pong:
+		default: // a congested link must not answer, that is what the peer's probe is for
+		}
+	case ctrlPong:
+		if nonce, ok := probeNonce(p); ok {
+			select {
+			case c.pongs <- nonce:
+			default:
+			}
 		}
 	}
 }
@@ -468,29 +556,154 @@ func (l *Link) writer(c *conn) {
 	tick := time.NewTicker(keepaliveEvery)
 	defer tick.Stop()
 	for {
-		var p []byte // nil is a keepalive frame
+		var (
+			p    []byte // nil is a keepalive frame
+			ctrl bool
+		)
+		// Probes go first: they measure the network, not our own queue.
 		select {
-		case p = <-c.sendQ:
-		case <-tick.C:
-		case <-c.done:
-			return
+		case p = <-c.ctrlQ:
+			ctrl = true
+		default:
+			select {
+			case p = <-c.ctrlQ:
+				ctrl = true
+			case p = <-c.sendQ:
+			case <-tick.C:
+			case <-c.done:
+				return
+			}
 		}
 		_ = c.tc.SetWriteDeadline(time.Now().Add(writeTimeout))
-		if err := writeFrame(c.tc, p); err != nil {
+		var err error
+		if ctrl {
+			err = writeControl(c.tc, p)
+		} else {
+			err = writeFrame(c.tc, p)
+		}
+		if err != nil {
 			return
 		}
-		if len(p) > 0 {
+		if !ctrl && len(p) > 0 {
 			l.st.txBytes.Add(uint64(len(p)))
 			l.st.txPkts.Add(1)
 		}
 	}
 }
 
+// probeSet sends one ping per size back to back and reports whether every one was echoed within the
+// timeout, and the slowest round trip. Pongs of earlier, timed-out probes are ignored.
+func (l *Link) probeSet(c *conn, sizes []int) (bool, time.Duration) {
+	pending := make(map[uint64]time.Time, len(sizes))
+	for _, size := range sizes {
+		nonce := rand.Uint64()
+		select {
+		case c.ctrlQ <- newProbe(nonce, size):
+			pending[nonce] = time.Now()
+		default:
+			return false, 0
+		}
+	}
+	l.st.probes.Add(uint64(len(sizes)))
+
+	timer := time.NewTimer(l.cfg.HealthTimeout)
+	defer timer.Stop()
+	var worst time.Duration
+	for len(pending) > 0 {
+		select {
+		case got := <-c.pongs:
+			if sent, ok := pending[got]; ok {
+				if d := time.Since(sent); d > worst {
+					worst = d
+				}
+				delete(pending, got)
+			}
+		case <-timer.C:
+			return false, worst
+		case <-c.done:
+			return false, worst
+		case <-l.ctx.Done():
+			return false, worst
+		}
+	}
+	c.rtt.Store(int64(worst))
+	return true, worst
+}
+
+// steadySize picks the size of one steady-state probe. It is random so the probes do not form a fixed
+// pattern on the wire.
+func steadySize() int { return 24 + rand.IntN(577) }
+
+// prober verifies a new connection and then keeps probing it. A connection that cannot echo probes, now or
+// later, is closed so the dial loop builds a fresh one. Without this a flow that a middlebox lets start and
+// then stalls stays "up" until the read deadline, and the tunnel would switch onto it in the meantime.
+func (l *Link) prober(c *conn) {
+	defer l.wg.Done()
+	if ok, _ := l.probeSet(c, verifyProbeSizes); !ok {
+		select {
+		case <-c.done:
+			return // closed meanwhile (a duplicate that lost the tie-break, or a shutdown): not a verification failure
+		case <-l.ctx.Done():
+			return
+		default:
+		}
+		l.st.verifyFails.Add(1)
+		l.setErrText("new TLS connection did not pass the health probes")
+		l.log.Warn("TLS", "[%s] New TLS connection to %s failed verification (no probe echoed within %v); reconnecting", l.iface, c.remote, l.cfg.HealthTimeout)
+		c.close()
+		return
+	}
+	l.markVerified(c)
+
+	retry := false
+	for {
+		// Jitter and random sizes keep the probes from forming a fixed pattern. After a miss the next
+		// probe goes out at once: a stalled stream needs no extra waiting between attempts.
+		if !retry {
+			wait := time.Duration(float64(l.cfg.HealthInterval) * (0.75 + rand.Float64()/2))
+			select {
+			case <-time.After(wait):
+			case <-c.done:
+				return
+			case <-l.ctx.Done():
+				return
+			}
+		}
+		retry = false
+
+		if ok, _ := l.probeSet(c, []int{steadySize()}); ok {
+			c.failures.Store(0)
+			continue
+		}
+		select {
+		case <-c.done:
+			return
+		default:
+		}
+		l.st.probeFails.Add(1)
+		n := int(c.failures.Add(1))
+		l.log.Debug("TLS", "[%s] Health probe unanswered (%d/%d)", l.iface, n, l.cfg.HealthFailures)
+		if n >= l.cfg.HealthFailures {
+			l.setErrText("TLS link stopped answering health probes")
+			l.log.Warn("TLS", "[%s] TLS link to %s failed its health check (%d probes unanswered); reconnecting", l.iface, c.remote, n)
+			c.close()
+			return
+		}
+		retry = true
+	}
+}
+
+func (l *Link) setErrText(s string) {
+	l.mu.Lock()
+	l.lastErr = s
+	l.mu.Unlock()
+}
+
 // Send queues a packet for the active connection and reports whether it was accepted. Packets are
 // dropped, never buffered without bound, when no link is up or the connection cannot keep up.
 func (l *Link) Send(p []byte) bool {
 	c := l.active.Load()
-	if c == nil {
+	if c == nil || !c.verified.Load() {
 		return false
 	}
 	cp := append([]byte(nil), p...)
@@ -503,12 +716,16 @@ func (l *Link) Send(p []byte) bool {
 	}
 }
 
-// Connected reports whether an authenticated connection is up.
-func (l *Link) Connected() bool { return l.active.Load() != nil }
+// Connected reports whether a verified connection is up: one that has echoed health probes of realistic
+// sizes. An authenticated connection that has not passed (yet) is not used.
+func (l *Link) Connected() bool {
+	c := l.active.Load()
+	return c != nil && c.verified.Load()
+}
 
-// DownFor is how long no connection has been up (zero while connected).
+// DownFor is how long no working connection has been up (zero while connected).
 func (l *Link) DownFor() time.Duration {
-	if l.active.Load() != nil {
+	if l.Connected() {
 		return 0
 	}
 	l.mu.Lock()
@@ -544,6 +761,19 @@ func (l *Link) SetTargets(raw []string) {
 	}
 	l.targets = append([]string(nil), raw...)
 	l.resolved = nil
+}
+
+// ResetConn drops the live connection so the dial loop (or the peer) builds a new one, keeping the
+// listener where it is. It is the remedy for a link whose probes pass while the traffic on it does not.
+func (l *Link) ResetConn() bool {
+	c := l.active.Load()
+	if c == nil {
+		return false
+	}
+	l.st.resets.Add(1)
+	l.log.Info("TLS", "[%s] Dropping the TLS connection to %s so a new one is built", l.iface, c.remote)
+	c.close()
+	return true
 }
 
 // Reconnect drops the live connection and moves the listener to a new port of the local range.

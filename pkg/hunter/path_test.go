@@ -83,6 +83,7 @@ type fakeTunnel struct {
 	started     bool
 	stopped     bool
 	reconnects  int
+	resets      int
 	primary     bool
 	targets     []string
 	relay       netip.AddrPort
@@ -106,6 +107,12 @@ func (f *fakeTunnel) SetTargets(t []string) {
 	f.mu.Unlock()
 }
 func (f *fakeTunnel) Reconnect() { f.mu.Lock(); f.reconnects++; f.mu.Unlock() }
+func (f *fakeTunnel) ResetConn() bool {
+	f.mu.Lock()
+	f.resets++
+	f.mu.Unlock()
+	return true
+}
 func (f *fakeTunnel) Status() tlstun.Status {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -447,5 +454,120 @@ func TestStatusReportsTLSLink(t *testing.T) {
 	if !st.TLSEnabled || !st.TLSConnected || st.TLSDirection != "dialed" || st.TLSRemote != "198.51.100.1:24512" ||
 		st.TLSListenPort != 20077 || st.TLSRelayPort != 41000 || st.TLSBytesRx != 10 || st.TLSBytesTx != 20 || st.Path != PathDirect {
 		t.Fatalf("unexpected status: %+v", st)
+	}
+}
+
+func (f *fakeTunnel) resetCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.resets }
+
+// WireGuard dead on a TLS path whose link still passes its probes: rebuild the connection once, halfway
+// through the window, before falling back to the direct path.
+func TestDeadWireGuardOnHealthyTLSLinkRebuildsTheConnectionOnce(t *testing.T) {
+	r := newPathRig(t)
+	r.tun.set(true, 0)
+	r.tick()
+	r.advance(16 * time.Second)
+	r.tick() // switches to TLS; the new path gets a fresh dead window
+	if r.path() != PathTLS {
+		t.Fatal("setup: expected TLS path")
+	}
+
+	r.advance(3 * time.Second)
+	r.tick()
+	if r.tun.resetCount() != 0 {
+		t.Fatal("must wait until half the fallback window has passed before rebuilding the connection")
+	}
+
+	r.advance(5 * time.Second) // 8s dead on TLS, fallback is 15s
+	r.tick()
+	if r.tun.resetCount() != 1 {
+		t.Fatalf("expected the connection to be rebuilt once, got %d resets", r.tun.resetCount())
+	}
+	if r.path() != PathTLS {
+		t.Fatal("rebuilding the connection must not change the path")
+	}
+
+	r.advance(2 * time.Second)
+	r.tick()
+	r.advance(2 * time.Second)
+	r.tick()
+	if r.tun.resetCount() != 1 {
+		t.Fatalf("the connection must be rebuilt only once per dead period, got %d", r.tun.resetCount())
+	}
+
+	r.advance(4 * time.Second) // 16s dead: the path gives up
+	r.tick()
+	if r.path() != PathDirect {
+		t.Fatalf("expected the direct path after a full window, got %s", r.path())
+	}
+}
+
+func TestNoConnectionRebuildWithoutAVerifiedLinkOrOnTheDirectPath(t *testing.T) {
+	// Direct path: the TLS link is only a standby, WireGuard being dead there is the hunter's business.
+	r := newPathRig(t)
+	r.tun.set(true, 0)
+	r.tick()
+	r.advance(10 * time.Second)
+	r.tick()
+	if r.tun.resetCount() != 0 {
+		t.Fatal("no rebuild while the direct path is active")
+	}
+
+	// TLS path, but the link is already down: that is handled by falling back, not by rebuilding.
+	r = newPathRig(t)
+	r.tun.set(true, 0)
+	r.tick()
+	r.advance(16 * time.Second)
+	r.tick()
+	r.tun.set(false, time.Second)
+	r.advance(8 * time.Second)
+	r.tick()
+	if r.tun.resetCount() != 0 {
+		t.Fatal("no rebuild while the link is not connected")
+	}
+}
+
+func TestConnectionRebuildIsAllowedAgainAfterRecovery(t *testing.T) {
+	r := newPathRig(t)
+	r.tun.set(true, 0)
+	r.tick()
+	r.advance(16 * time.Second)
+	r.tick() // TLS
+	r.advance(8 * time.Second)
+	r.tick() // first rebuild
+	if r.tun.resetCount() != 1 {
+		t.Fatalf("setup: expected one rebuild, got %d", r.tun.resetCount())
+	}
+
+	r.be.setAlive() // WireGuard works again over the new connection
+	r.advance(time.Second)
+	r.tick()
+	r.be.setDead() // and stalls again later
+	r.advance(2 * time.Second)
+	r.tick() // new dead period starts
+	r.advance(8 * time.Second)
+	r.tick()
+	if r.tun.resetCount() != 2 {
+		t.Fatalf("a new dead period must allow another rebuild, got %d resets", r.tun.resetCount())
+	}
+}
+
+func TestResetAfterWindow(t *testing.T) {
+	for _, c := range []struct{ fallback, want time.Duration }{
+		{15 * time.Second, 7500 * time.Millisecond},
+		{3 * time.Second, 2 * time.Second},
+		{60 * time.Second, 30 * time.Second},
+	} {
+		if got := resetAfter(c.fallback); got != c.want {
+			t.Errorf("resetAfter(%v) = %v, want %v", c.fallback, got, c.want)
+		}
+	}
+}
+
+func TestStatusReportsLinkHealth(t *testing.T) {
+	r := newPathRig(t)
+	r.tun.statusExtra = tlstun.Status{RTTMs: 42.5, ProbeFails: 3, VerifyFails: 2, Resets: 1, Verifying: true}
+	st := r.h.GetStatus()
+	if st.TLSRTTMs != 42.5 || st.TLSProbeFails != 3 || st.TLSVerifyFails != 2 || st.TLSResets != 1 || !st.TLSVerifying {
+		t.Fatalf("link health missing from the status: %+v", st)
 	}
 }

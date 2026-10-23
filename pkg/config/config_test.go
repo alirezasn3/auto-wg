@@ -276,6 +276,9 @@ func TestTLSDefaultsAndValidation(t *testing.T) {
 	if tl.PortRange != "20000-24999" || tl.RemotePortRange != "25000-29999" || tl.FallbackAfter != 15*time.Second || tl.DialInterval != time.Second {
 		t.Fatalf("unexpected defaults: %+v", tl)
 	}
+	if tl.HealthInterval != 3*time.Second || tl.HealthTimeout != 2*time.Second || tl.HealthFailures != 3 {
+		t.Fatalf("unexpected health defaults: %+v", tl)
+	}
 	if err := Validate(c); err != nil {
 		t.Fatalf("defaults must validate: %v", err)
 	}
@@ -286,6 +289,11 @@ func TestTLSDefaultsAndValidation(t *testing.T) {
 		"bad range":      func(c *Config) { c.Tunnels[0].TLS.PortRange = "nonsense" },
 		"fast fallback":  func(c *Config) { c.Tunnels[0].TLS.FallbackAfter = time.Second },
 		"fast dial":      func(c *Config) { c.Tunnels[0].TLS.DialInterval = time.Millisecond },
+		"fast probes":    func(c *Config) { c.Tunnels[0].TLS.HealthInterval = 500 * time.Millisecond },
+		"tiny timeout":   func(c *Config) { c.Tunnels[0].TLS.HealthTimeout = 100 * time.Millisecond },
+		"huge timeout":   func(c *Config) { c.Tunnels[0].TLS.HealthTimeout = time.Minute },
+		"no failures":    func(c *Config) { c.Tunnels[0].TLS.HealthFailures = -1 },
+		"many failures":  func(c *Config) { c.Tunnels[0].TLS.HealthFailures = 50 },
 		"relay in range": func(c *Config) { c.Tunnels[0].TLS.RelayPort = 21000 },
 		"low relay":      func(c *Config) { c.Tunnels[0].TLS.RelayPort = 80 },
 		"bad sni":        func(c *Config) { c.Tunnels[0].TLS.SNI = "not a host" },

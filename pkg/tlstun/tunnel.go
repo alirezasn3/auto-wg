@@ -20,7 +20,13 @@ type Deps struct {
 
 // Status is a snapshot of the TLS path for the dashboard.
 type Status struct {
-	Connected    bool      `json:"connected"`
+	Connected    bool      `json:"connected"`           // a verified connection is up
+	Verifying    bool      `json:"verifying,omitempty"` // a connection exists but has not passed the probes yet
+	RTTMs        float64   `json:"rtt_ms"`              // last health probe round trip
+	Probes       uint64    `json:"probes"`
+	ProbeFails   uint64    `json:"probe_failures"`
+	VerifyFails  uint64    `json:"verify_failures"`
+	Resets       uint64    `json:"resets"`
 	Direction    string    `json:"direction,omitempty"` // "dialed" or "accepted"
 	Remote       string    `json:"remote,omitempty"`
 	Since        time.Time `json:"since,omitempty"`
@@ -90,6 +96,7 @@ func (t *Tunnel) DownFor() time.Duration { return t.link.DownFor() }
 func (t *Tunnel) SetPrimary(p bool)      { t.link.SetPrimary(p) }
 func (t *Tunnel) SetTargets(r []string)  { t.link.SetTargets(r) }
 func (t *Tunnel) Reconnect()             { t.link.Reconnect() }
+func (t *Tunnel) ResetConn() bool        { return t.link.ResetConn() }
 
 // RelayAddr is the loopback endpoint WireGuard must use while the TLS path is active.
 func (t *Tunnel) RelayAddr() netip.AddrPort {
@@ -108,6 +115,10 @@ func (t *Tunnel) Status() Status {
 		Dropped:      t.link.st.dropped.Load(),
 		Dials:        t.link.st.dials.Load(),
 		AuthFailures: t.link.st.authFails.Load(),
+		Probes:       t.link.st.probes.Load(),
+		ProbeFails:   t.link.st.probeFails.Load(),
+		VerifyFails:  t.link.st.verifyFails.Load(),
+		Resets:       t.link.st.resets.Load(),
 	}
 	if t.relay != nil {
 		s.RelayPort = t.relay.port
@@ -117,7 +128,13 @@ func (t *Tunnel) Status() Status {
 	s.LastError = t.link.lastErr
 	t.link.mu.Unlock()
 	if c := t.link.active.Load(); c != nil {
-		s.Connected, s.Direction, s.Remote, s.Since = true, c.direction(), c.remote, c.since
+		s.Direction, s.Remote, s.Since = c.direction(), c.remote, c.since
+		s.RTTMs = float64(c.rtt.Load()) / float64(time.Millisecond)
+		if c.verified.Load() {
+			s.Connected = true
+		} else {
+			s.Verifying = true
+		}
 	}
 	return s
 }

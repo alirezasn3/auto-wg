@@ -547,14 +547,24 @@ class AutoWGApp {
       this.pathState.style.color = onTls ? 'var(--accent-text)' : '';
     }
     if (this.tlsLinkState) {
+      const traffic = `↓ ${formatBytes(data.tls_bytes_rx)} ↑ ${formatBytes(data.tls_bytes_tx)}`;
+      const resets = data.tls_resets > 0 ? ` · ${data.tls_resets} rebuilt` : '';
+      this.tlsLinkState.title = '';
       if (data.tls_connected) {
-        this.tlsLinkState.textContent = `Up · ${data.tls_direction || ''} ${data.tls_remote || ''} · ↓ ${formatBytes(data.tls_bytes_rx)} ↑ ${formatBytes(data.tls_bytes_tx)}`;
-        this.tlsLinkState.title = '';
+        const rtt = data.tls_rtt_ms > 0 ? ` · ${data.tls_rtt_ms < 10 ? data.tls_rtt_ms.toFixed(1) : Math.round(data.tls_rtt_ms)} ms` : '';
+        const lost = data.tls_probe_failures > 0 ? ` · ${data.tls_probe_failures} probes lost` : '';
+        this.tlsLinkState.textContent = `Up · ${data.tls_direction || ''} ${data.tls_remote || ''}${rtt} · ${traffic}${lost}${resets}`;
         this.tlsLinkState.style.color = 'var(--success)';
+      } else if (data.tls_verifying) {
+        this.tlsLinkState.textContent = 'Connected, checking it carries traffic...';
+        this.tlsLinkState.style.color = 'var(--warning)';
       } else {
-        const authProblem = /authenticat/i.test(data.tls_last_error || '');
-        this.tlsLinkState.textContent = authProblem ? 'Down · authentication failed, check tls.secret' : 'Down · dialing';
-        this.tlsLinkState.title = data.tls_last_error || '';
+        const err = data.tls_last_error || '';
+        let text = 'Down · dialing';
+        if (/authenticat/i.test(err)) text = 'Down · authentication failed, check tls.secret';
+        else if (/health|probe/i.test(err)) text = 'Down · connection stalled, reconnecting';
+        this.tlsLinkState.textContent = text + resets;
+        this.tlsLinkState.title = err;
         this.tlsLinkState.style.color = 'var(--warning)';
       }
     }
@@ -1177,6 +1187,11 @@ class AutoWGApp {
               ${formField('Dial interval', text('t-tls-dial', formatDuration(tls.dial_interval, '1s'), '1s'))}
               ${formField('Relay port', num('t-tls-relay', tls.relay_port || 0, '0'), '0 = automatic (loopback UDP)')}
             </div>
+            <div class="form-grid-3">
+              ${formField('Health probe every', text('t-tls-health-interval', formatDuration(tls.health_interval, '3s'), '3s'), 'Ping/pong over the TLS link')}
+              ${formField('Probe timeout', text('t-tls-health-timeout', formatDuration(tls.health_timeout, '2s'), '2s'))}
+              ${formField('Failures before reconnect', num('t-tls-health-failures', tls.health_failures || 3, '3'), 'Consecutive unanswered probes')}
+            </div>
             <div class="form-grid-2">
               ${formField('SNI (optional)', text('t-tls-sni', tls.sni || '', 'www.example.com'), 'Server name sent in the TLS handshake')}
               ${formField('ALPN (optional)', text('t-tls-alpn', (tls.alpn || []).join(', '), 'h2, http/1.1'), 'Comma separated')}
@@ -1325,6 +1340,9 @@ class AutoWGApp {
         relay_port: intVal('.t-tls-relay', 0),
         fallback_after: val('.t-tls-fallback') || '15s',
         dial_interval: val('.t-tls-dial') || '1s',
+        health_interval: val('.t-tls-health-interval') || '3s',
+        health_timeout: val('.t-tls-health-timeout') || '2s',
+        health_failures: intVal('.t-tls-health-failures', 3),
         sni: val('.t-tls-sni'),
         alpn: val('.t-tls-alpn').split(',').map(x => x.trim()).filter(x => x.length > 0)
       };
@@ -1454,6 +1472,9 @@ class AutoWGApp {
         if (tl.relay_port > 0) lines.push(`      relay_port: ${tl.relay_port}`);
         if (tl.fallback_after) lines.push(`      fallback_after: "${tl.fallback_after}"`);
         if (tl.dial_interval) lines.push(`      dial_interval: "${tl.dial_interval}"`);
+        if (tl.health_interval) lines.push(`      health_interval: "${tl.health_interval}"`);
+        if (tl.health_timeout) lines.push(`      health_timeout: "${tl.health_timeout}"`);
+        if (tl.health_failures > 0) lines.push(`      health_failures: ${tl.health_failures}`);
         if (tl.sni) lines.push(`      sni: ${JSON.stringify(tl.sni)}`);
         if (tl.alpn && tl.alpn.length > 0) lines.push(`      alpn: [${tl.alpn.map(a => JSON.stringify(a)).join(', ')}]`);
       }

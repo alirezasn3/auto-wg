@@ -57,9 +57,12 @@ func authenticate(c *tls.Conn, secret string, dialer bool) error {
 		if err := writeFrame(c, mine); err != nil {
 			return err
 		}
-		got, err := readFrame(c, buf)
+		got, ctrl, err := readFrame(c, buf)
 		if err != nil {
 			return err
+		}
+		if ctrl {
+			return ErrAuth
 		}
 		want, err := proof(secret, cs, roleAcceptor)
 		if err != nil {
@@ -71,9 +74,12 @@ func authenticate(c *tls.Conn, secret string, dialer bool) error {
 		return nil
 	}
 
-	got, err := readFrame(c, buf)
+	got, ctrl, err := readFrame(c, buf)
 	if err != nil {
 		return err
+	}
+	if ctrl {
+		return ErrAuth
 	}
 	want, err := proof(secret, cs, roleDialer)
 	if err != nil {
@@ -121,6 +127,9 @@ func newCert(name string) (tls.Certificate, error) {
 	}
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, nil
 }
+
+// fillRandom fills b with cryptographically random bytes (probe padding must not be a recognisable pattern).
+func fillRandom(b []byte) { _, _ = rand.Read(b) }
 
 func serverTLS(cert tls.Certificate, alpn []string) *tls.Config {
 	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13, NextProtos: alpn}

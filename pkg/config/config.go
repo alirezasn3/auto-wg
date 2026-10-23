@@ -77,6 +77,9 @@ type TLSConfig struct {
 	RelayPort       int           `yaml:"relay_port,omitempty" json:"relay_port"`                       // Loopback UDP port WireGuard talks to on this path (0 = automatic)
 	FallbackAfter   time.Duration `yaml:"fallback_after,omitempty" json:"fallback_after"`               // How long the active path must be dead before switching (default: 15s)
 	DialInterval    time.Duration `yaml:"dial_interval,omitempty" json:"dial_interval"`                 // Pause between dial attempts while no link is up (default: 1s)
+	HealthInterval  time.Duration `yaml:"health_interval,omitempty" json:"health_interval"`             // Pause between health probes on a live TLS link (default: 3s)
+	HealthTimeout   time.Duration `yaml:"health_timeout,omitempty" json:"health_timeout"`               // How long a probe may stay unanswered (default: 2s)
+	HealthFailures  int           `yaml:"health_failures,omitempty" json:"health_failures"`             // Consecutive unanswered probes that drop the link (default: 3)
 	SNI             string        `yaml:"sni,omitempty" json:"sni"`                                     // Optional server name sent in the ClientHello (and used as certificate name)
 	ALPN            []string      `yaml:"alpn,omitempty" json:"alpn"`                                   // Optional ALPN protocols, e.g. ["h2", "http/1.1"]
 }
@@ -202,6 +205,15 @@ func SetDefaults(cfg *Config) {
 			if t.TLS.DialInterval <= 0 {
 				t.TLS.DialInterval = time.Second
 			}
+			if t.TLS.HealthInterval <= 0 {
+				t.TLS.HealthInterval = 3 * time.Second
+			}
+			if t.TLS.HealthTimeout <= 0 {
+				t.TLS.HealthTimeout = 2 * time.Second
+			}
+			if t.TLS.HealthFailures <= 0 {
+				t.TLS.HealthFailures = 3
+			}
 		}
 		if t.Hunting == nil {
 			defaultHunting := !t.Passive
@@ -266,6 +278,15 @@ func validateTLS(t TunnelConfig) error {
 	}
 	if c.DialInterval < 200*time.Millisecond {
 		return fmt.Errorf("tls.dial_interval must be at least 200ms")
+	}
+	if c.HealthInterval < time.Second {
+		return fmt.Errorf("tls.health_interval must be at least 1s")
+	}
+	if c.HealthTimeout < 500*time.Millisecond || c.HealthTimeout > 30*time.Second {
+		return fmt.Errorf("tls.health_timeout must be between 500ms and 30s")
+	}
+	if c.HealthFailures < 1 || c.HealthFailures > 20 {
+		return fmt.Errorf("tls.health_failures must be between 1 and 20")
 	}
 	if c.RelayPort != 0 {
 		if c.RelayPort < 1024 || c.RelayPort > 65535 {

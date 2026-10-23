@@ -41,6 +41,8 @@ func testCfg(local, remote, secret string) config.TLSConfig {
 	return config.TLSConfig{
 		Enabled: true, Secret: secret, PortRange: local, RemotePortRange: remote,
 		FallbackAfter: 15 * time.Second, DialInterval: 100 * time.Millisecond,
+		// Fast probes so stall detection takes a second or two in tests instead of tens of seconds.
+		HealthInterval: 150 * time.Millisecond, HealthTimeout: 400 * time.Millisecond, HealthFailures: 3,
 	}
 }
 

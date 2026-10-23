@@ -34,6 +34,7 @@ const (
 	pathStay pathAction = iota
 	pathToTLS
 	pathToDirect
+	pathResetLink // rebuild the TLS connection: WireGuard is dead although the link passes its probes
 )
 
 // tlsLink is the part of tlstun.Tunnel the hunter uses; tests substitute a fake.
@@ -46,6 +47,7 @@ type tlsLink interface {
 	SetPrimary(bool)
 	SetTargets([]string)
 	Reconnect()
+	ResetConn() bool
 	Status() tlstun.Status
 }
 
@@ -170,12 +172,41 @@ func (h *Hunter) planFailoverLocked() (act pathAction, holdDirect bool) {
 		if deadFor >= fallback {
 			return pathToDirect, true
 		}
+		// The link's own probes passed but WireGuard is still dead: a middlebox can single out what
+		// WireGuard sends (or stall a flow only after it started). A new connection starts from scratch,
+		// so try that once, halfway through the window, before giving up on the path.
+		if !h.tlsResetDone && h.tun.Connected() && deadFor >= resetAfter(fallback) {
+			return pathResetLink, true
+		}
 		return pathStay, true
 	}
 	if deadFor >= fallback && h.tun.Connected() {
 		return pathToTLS, false
 	}
 	return pathStay, false
+}
+
+// resetAfter is how long WireGuard must be dead on a healthy-looking TLS link before the connection is
+// rebuilt: half the fallback window, but not less than 2s.
+func resetAfter(fallback time.Duration) time.Duration {
+	if d := fallback / 2; d > 2*time.Second {
+		return d
+	}
+	return 2 * time.Second
+}
+
+// resetTLSLink rebuilds the TLS connection (once per dead period; see planFailoverLocked).
+func (h *Hunter) resetTLSLink(reason string) {
+	h.mu.Lock()
+	tun := h.tun
+	h.tlsResetDone = true
+	iface := h.cfg.Interface
+	h.mu.Unlock()
+	if tun == nil {
+		return
+	}
+	h.log.Info("TLS", "[%s] WireGuard is dead on the TLS path although the link passes its probes (%s); building a new TLS connection", iface, reason)
+	tun.ResetConn()
 }
 
 // directEndpointLocked is the endpoint to restore when going back to the direct path: the last direct peer
@@ -228,6 +259,7 @@ func (h *Hunter) switchPath(act pathAction, reason string) {
 	defer h.mu.Unlock()
 	h.activePath = next
 	h.lastPathSwitch = h.now()
+	h.tlsResetDone = false
 	h.deadSince = h.now() // the new path gets a full fallback window before it is judged
 	h.log.Info("TLS", "[%s] Switched to the %s path (endpoint %s): %s", iface, next, endpoint, reason)
 	h.addEvent(EventPath, pathLabel(prev, next), "Local Host", reason, 0)

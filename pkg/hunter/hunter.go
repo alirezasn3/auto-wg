@@ -90,6 +90,11 @@ type StatusReport struct {
 	TLSBytesRx     uint64    `json:"tls_bytes_rx"`
 	TLSBytesTx     uint64    `json:"tls_bytes_tx"`
 	TLSLastError   string    `json:"tls_last_error,omitempty"`
+	TLSVerifying   bool      `json:"tls_verifying,omitempty"`
+	TLSRTTMs       float64   `json:"tls_rtt_ms"`
+	TLSProbeFails  uint64    `json:"tls_probe_failures"`
+	TLSVerifyFails uint64    `json:"tls_verify_failures"`
+	TLSResets      uint64    `json:"tls_resets"`
 	LastPathSwitch time.Time `json:"last_path_switch"`
 }
 
@@ -156,6 +161,7 @@ type Hunter struct {
 	newTunnel      func(config.TLSConfig, tlstun.Deps) tlsLink
 	activePath     string
 	deadSince      time.Time
+	tlsResetDone   bool // the TLS connection was already rebuilt in this dead period
 	lastPathSwitch time.Time
 	wgListenPort   atomic.Int32
 	now            func() time.Time
@@ -715,7 +721,7 @@ func (h *Hunter) tick(ctx context.Context) {
 					remoteEndpointStr := h.remoteDescLocked()
 					h.addEvent(StateConnected, dir, "Initial Ping", fmt.Sprintf("Ping verified: :%d -> %s", h.localPort, remoteEndpointStr), 0)
 				}
-				h.deadSince = time.Time{}
+				h.deadSince, h.tlsResetDone = time.Time{}, false
 				h.setState(StateConnected)
 				h.mu.Unlock()
 				return
@@ -779,7 +785,7 @@ func (h *Hunter) tick(ctx context.Context) {
 					iface, h.localPort, remoteEndpointStr, dev.HandshakeAge.Round(time.Millisecond))
 				h.addEvent(StateConnected, dir, "Initial Handshake", fmt.Sprintf("Link active: :%d -> %s", h.localPort, remoteEndpointStr), 0)
 			}
-			h.deadSince = time.Time{}
+			h.deadSince, h.tlsResetDone = time.Time{}, false
 			h.setState(StateConnected)
 			h.failedPings = 0
 			h.mu.Unlock()
@@ -822,6 +828,10 @@ func (h *Hunter) tick(ctx context.Context) {
 	// With a TLS path configured, a link that stays dead moves to the other path before (or instead of)
 	// hunting new direct ports; while the TLS path is active direct hunting is held back so it cannot
 	// flip the endpoint away from the relay.
+	if act == pathResetLink {
+		h.resetTLSLink(stallReason)
+		return
+	}
 	if act != pathStay {
 		h.switchPath(act, stallReason)
 		return
@@ -1098,6 +1108,11 @@ func (h *Hunter) GetStatus() StatusReport {
 		report.TLSBytesRx = ts.BytesRx
 		report.TLSBytesTx = ts.BytesTx
 		report.TLSLastError = ts.LastError
+		report.TLSVerifying = ts.Verifying
+		report.TLSRTTMs = ts.RTTMs
+		report.TLSProbeFails = ts.ProbeFails
+		report.TLSVerifyFails = ts.VerifyFails
+		report.TLSResets = ts.Resets
 	}
 	return report
 }
