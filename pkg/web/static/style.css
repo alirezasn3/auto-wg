@@ -4,6 +4,7 @@
   --accent: #017a47;
   --accent-hover: #01673c;
   --accent-soft: rgba(1, 122, 71, 0.12);
+  --accent-text: #017a47;
   --on-accent: #fff;
 
   --bg: #f5f7f6;
@@ -26,6 +27,7 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --accent-hover: #02925a;
+    --accent-text: #3fbf86;
     --accent-soft: rgba(1, 122, 71, 0.22);
 
     --bg: #0e1311;
@@ -231,6 +233,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .flow-pulse { position: absolute; top: 0; left: -30%; width: 30%; height: 100%; background: var(--accent); animation: flow 2.2s linear infinite; }
 .bridge-badges { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
 .bridge-badge { font-size: 11px; padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted); }
+.bridge-badge.path-tls { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .bridge-direction.dir-local-to-remote, .bridge-direction.dir-remote-to-local { border-color: var(--accent); color: var(--accent); }
 .bridge-metrics { display: flex; flex-direction: column; gap: 4px; width: 100%; font-size: 13px; }
 .metric { display: flex; justify-content: space-between; gap: 8px; }
@@ -255,6 +258,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .event-left { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; min-width: 0; }
 .event-badge { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; }
 .event-badge.connected { background: var(--accent-soft); color: var(--success); }
+.event-badge.path { background: var(--surface-2); color: var(--accent-text); border: 1px solid var(--accent); }
 .event-badge.disconnected { background: rgba(239, 106, 96, 0.14); color: var(--danger); }
 .event-direction-badge { font-size: 11px; padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted); }
 .event-info { flex-basis: 100%; }
@@ -353,6 +357,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .switch-label input:checked + .switch-slider { background: var(--accent); }
 .switch-label input:checked + .switch-slider::after { transform: translateX(13px); }
 .switch-label input:focus-visible + .switch-slider { box-shadow: 0 0 0 3px var(--accent-soft); }
+.input-row { display: flex; gap: 6px; align-items: center; }
+.input-row .form-input { flex: 1; min-width: 0; }
 .toggle-row { display: flex; gap: 8px 24px; flex-wrap: wrap; }
 
 /* Tunnel editor: one collapsible row per tunnel, fields flat inside */
@@ -373,6 +379,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .tunnel-body > .group:first-child { border-top: none; }
 .group-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); }
 .group-label .switch-label { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.group-note { font-size: 12px; color: var(--text-dim); margin-top: -6px; }
+.group.off .group-note { display: none; }
 .group-fields { display: flex; flex-direction: column; gap: 12px; }
 .group.off .group-fields { opacity: 0.45; pointer-events: none; }
 

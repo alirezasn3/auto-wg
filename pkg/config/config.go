@@ -52,6 +52,7 @@ type TunnelConfig struct {
 	HandshakeTimeout time.Duration    `yaml:"handshake_timeout" json:"handshake_timeout"` // Stale handshake threshold (default: 60s)
 	CycleTimeout     time.Duration    `yaml:"cycle_timeout" json:"cycle_timeout"`         // Staggered turn duration (default: 8s)
 	TunnelPing       TunnelPingConfig `yaml:"tunnel_ping" json:"tunnel_ping"`
+	TLS              TLSConfig        `yaml:"tls,omitempty" json:"tls"` // UDP-over-TLS fallback path (needs Auto-WG on both peers)
 	HistoryFile      string           `yaml:"history_file" json:"history_file"` // Persistent history file path
 	Iptables         bool             `yaml:"iptables" json:"iptables"`         // Manage iptables REDIRECT rule (default: true)
 	PostUp           []string         `yaml:"post_up" json:"post_up"`           // Per-tunnel post_up shell commands
@@ -65,6 +66,23 @@ type TunnelPingConfig struct {
 	Timeout          time.Duration `yaml:"timeout" json:"timeout"`                     // Single ping timeout (default: 2s)
 	FailureThreshold int           `yaml:"failure_threshold" json:"failure_threshold"` // Consecutive failed pings before hunt (default: 3)
 }
+
+// TLSConfig describes the UDP-over-TLS path that backs up the direct WireGuard path. Both peers run
+// a TCP listener and a dial loop; WireGuard is pointed at a loopback UDP relay while this path is active.
+type TLSConfig struct {
+	Enabled         bool          `yaml:"enabled" json:"enabled"`
+	Secret          string        `yaml:"secret" json:"secret"`                                         // Shared secret both peers authenticate with
+	PortRange       string        `yaml:"port_range,omitempty" json:"port_range"`                       // Local TCP range redirected to the listener (default: tunnel port_range)
+	RemotePortRange string        `yaml:"remote_port_range,omitempty" json:"remote_port_range"`         // Peer's TCP range to dial (default: tunnel remote_port_range)
+	RelayPort       int           `yaml:"relay_port,omitempty" json:"relay_port"`                       // Loopback UDP port WireGuard talks to on this path (0 = automatic)
+	FallbackAfter   time.Duration `yaml:"fallback_after,omitempty" json:"fallback_after"`               // How long the active path must be dead before switching (default: 15s)
+	DialInterval    time.Duration `yaml:"dial_interval,omitempty" json:"dial_interval"`                 // Pause between dial attempts while no link is up (default: 1s)
+	SNI             string        `yaml:"sni,omitempty" json:"sni"`                                     // Optional server name sent in the ClientHello (and used as certificate name)
+	ALPN            []string      `yaml:"alpn,omitempty" json:"alpn"`                                   // Optional ALPN protocols, e.g. ["h2", "http/1.1"]
+}
+
+// MaskedSecret replaces secrets in configuration returned to the web UI.
+const MaskedSecret = "********"
 
 type WebConfig struct {
 	Enabled    bool     `yaml:"enabled" json:"enabled"`         // Enable web dashboard (default: true)
@@ -171,6 +189,20 @@ func SetDefaults(cfg *Config) {
 			t.Name = t.Interface
 		}
 		t.Backend = NormalizeBackend(t.Backend)
+		if t.TLS.Enabled {
+			if t.TLS.PortRange == "" {
+				t.TLS.PortRange = t.PortRange
+			}
+			if t.TLS.RemotePortRange == "" {
+				t.TLS.RemotePortRange = t.RemotePortRange
+			}
+			if t.TLS.FallbackAfter <= 0 {
+				t.TLS.FallbackAfter = 15 * time.Second
+			}
+			if t.TLS.DialInterval <= 0 {
+				t.TLS.DialInterval = time.Second
+			}
+		}
 		if t.Hunting == nil {
 			defaultHunting := !t.Passive
 			t.Hunting = &defaultHunting
@@ -215,6 +247,47 @@ func NormalizeBackend(b string) string {
 	return strings.TrimSpace(b)
 }
 
+// validateTLS checks the UDP-over-TLS settings of an enabled tunnel.
+func validateTLS(t TunnelConfig) error {
+	c := t.TLS
+	if len(c.Secret) < 16 {
+		return fmt.Errorf("tls.secret must be at least 16 characters (it must match on both peers)")
+	}
+	if t.Passive || (t.Hunting != nil && !*t.Hunting) {
+		return fmt.Errorf("tls needs port hunting; it cannot be used on a passive tunnel because the peer must run Auto-WG too")
+	}
+	for name, spec := range map[string]string{"tls.port_range": c.PortRange, "tls.remote_port_range": c.RemotePortRange} {
+		if _, _, err := ParsePortRange(spec); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	if c.FallbackAfter < 3*time.Second {
+		return fmt.Errorf("tls.fallback_after must be at least 3s")
+	}
+	if c.DialInterval < 200*time.Millisecond {
+		return fmt.Errorf("tls.dial_interval must be at least 200ms")
+	}
+	if c.RelayPort != 0 {
+		if c.RelayPort < 1024 || c.RelayPort > 65535 {
+			return fmt.Errorf("tls.relay_port must be 0 (automatic) or between 1024 and 65535")
+		}
+		for _, spec := range []string{t.PortRange, t.RemotePortRange} {
+			if start, end, err := ParsePortRange(spec); err == nil && c.RelayPort >= start && c.RelayPort <= end {
+				return fmt.Errorf("tls.relay_port %d lies inside the UDP port range %s", c.RelayPort, spec)
+			}
+		}
+	}
+	if strings.ContainsAny(c.SNI, " \t/") {
+		return fmt.Errorf("tls.sni must be a host name")
+	}
+	for _, p := range c.ALPN {
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("tls.alpn must not contain empty entries")
+		}
+	}
+	return nil
+}
+
 // Validate checks for configuration sanity, non-empty interfaces, unique names,
 // and ensures local port ranges do not overlap when iptables is active.
 func Validate(cfg *Config) error {
@@ -228,7 +301,7 @@ func Validate(cfg *Config) error {
 		start int
 		end   int
 	}
-	var spans []portSpan
+	var spans, tlsSpans []portSpan
 
 	for i, t := range cfg.Tunnels {
 		iface := strings.TrimSpace(t.Interface)
@@ -242,6 +315,22 @@ func Validate(cfg *Config) error {
 
 		if b := NormalizeBackend(t.Backend); b != BackendWireGuard && b != BackendAmneziaWG {
 			return fmt.Errorf("tunnel %q has unknown backend %q (use %q or %q)", iface, t.Backend, BackendWireGuard, BackendAmneziaWG)
+		}
+
+		if t.TLS.Enabled {
+			if err := validateTLS(t); err != nil {
+				return fmt.Errorf("tunnel %q: %w", iface, err)
+			}
+			if t.Iptables {
+				start, end, _ := ParsePortRange(t.TLS.PortRange)
+				for _, prev := range tlsSpans {
+					if start <= prev.end && prev.start <= end {
+						return fmt.Errorf("tls.port_range conflict: tunnel %q (%d-%d) overlaps with tunnel %q (%d-%d)",
+							iface, start, end, prev.iface, prev.start, prev.end)
+					}
+				}
+				tlsSpans = append(tlsSpans, portSpan{iface: iface, start: start, end: end})
+			}
 		}
 
 		if t.Iptables && t.PortRange != "" {

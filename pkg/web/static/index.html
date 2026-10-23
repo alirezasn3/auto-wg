@@ -75,7 +75,7 @@
           <div class="bridge">
             <div class="bridge-line"><div class="flow-pulse"></div></div>
             <div class="bridge-badges">
-              <span class="bridge-badge">UDP</span>
+              <span class="bridge-badge" id="bridgeProtoBadge">UDP</span>
               <span class="bridge-badge bridge-direction" id="flowDirectionBadge">Local ⇄ Remote</span>
             </div>
             <div class="bridge-metrics">
@@ -141,6 +141,8 @@
           <div class="caption" id="iptablesSubtext">PREROUTING REDIRECT</div>
           <dl class="kv">
             <div class="kv-row"><dt>Port range</dt><dd id="iptablesRange">20000-30000</dd></div>
+            <div class="kv-row" id="rowPath" style="display: none;"><dt>Path</dt><dd id="pathState">Direct UDP</dd></div>
+            <div class="kv-row" id="rowTlsLink" style="display: none;"><dt>TLS link</dt><dd id="tlsLinkState">--</dd></div>
             <div class="kv-row"><dt>In-tunnel target</dt><dd id="tunnelPingTarget">Auto-detecting...</dd></div>
             <div class="kv-row"><dt>Failed pings</dt><dd id="failedPingsCount">0</dd></div>
           </dl>
@@ -381,6 +383,15 @@
   - "198.51.100.1"
   - "2001:db8::1"
   - "vps.example.com"</code></pre>
+          </div>
+          <div class="help-box">
+            <h4>UDP over TLS fallback</h4>
+            <p>A second path for when direct WireGuard is blocked. Both peers need Auto-WG and the same secret.</p>
+            <pre><code>tls:
+  enabled: true
+  secret: "&lt;same on both peers&gt;"
+  port_range: "443-8443"
+  fallback_after: 15s</code></pre>
           </div>
           <div class="help-box">
             <h4>Policy routing failover</h4>

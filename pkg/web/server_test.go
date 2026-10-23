@@ -473,3 +473,84 @@ func TestStatusPageHTTPSAndMissingCert(t *testing.T) {
 		t.Errorf("Expected HTTPS 200, got %d", resp.StatusCode)
 	}
 }
+
+func TestServerConfigAPIMasksSecrets(t *testing.T) {
+	s, sup := setupTestServer(t)
+	const tlsSecret, webPass = "tls-shared-secret-123456", "web-password-xyz"
+
+	post := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/config", strings.NewReader(body))
+		req.Header.Set("Content-Type", "text/yaml")
+		w := httptest.NewRecorder()
+		s.handleConfig(w, req)
+		return w
+	}
+
+	withSecrets := `mode: "server"
+tunnels:
+  - interface: "wg0"
+    name: "first"
+    port_range: "20000-29999"
+    remote_port_range: "20000-29999"
+    history_file: "off"
+    tls:
+      enabled: true
+      secret: "` + tlsSecret + `"
+web:
+  enabled: true
+  password: "` + webPass + `"
+`
+	if w := post(withSecrets); w.Code != http.StatusOK {
+		t.Fatalf("setup POST failed %d: %s", w.Code, w.Body.String())
+	}
+
+	// What the UI receives must not contain either secret, in the parsed config or in the YAML text.
+	getW := httptest.NewRecorder()
+	s.handleConfig(getW, httptest.NewRequest("GET", "/api/config", nil))
+	body := getW.Body.String()
+	if strings.Contains(body, tlsSecret) || strings.Contains(body, webPass) {
+		t.Fatalf("a secret leaked to the web UI: %s", body)
+	}
+	var resp struct {
+		Config config.Config `json:"config"`
+		YAML   string        `json:"yaml"`
+	}
+	if err := json.Unmarshal(getW.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Config.Tunnels[0].TLS.Secret != config.MaskedSecret || resp.Config.Web.Password != config.MaskedSecret {
+		t.Fatalf("expected masked values in the parsed config: %+v", resp.Config)
+	}
+	rawW := httptest.NewRecorder()
+	s.handleConfig(rawW, httptest.NewRequest("GET", "/api/config?raw=true", nil))
+	if strings.Contains(rawW.Body.String(), tlsSecret) || strings.Contains(rawW.Body.String(), webPass) {
+		t.Fatal("a secret leaked through ?raw=true")
+	}
+
+	// Saving the masked text back must keep the stored secrets, in memory and on disk.
+	edited := strings.Replace(resp.YAML, `name: "first"`, `name: "second"`, 1)
+	if edited == resp.YAML {
+		t.Fatalf("test setup: could not edit the YAML:\n%s", resp.YAML)
+	}
+	if w := post(edited); w.Code != http.StatusOK {
+		t.Fatalf("saving masked YAML failed %d: %s", w.Code, w.Body.String())
+	}
+	live := sup.GetConfig()
+	if live.Tunnels[0].Name != "second" || live.Tunnels[0].TLS.Secret != tlsSecret || live.Web.Password != webPass {
+		t.Fatalf("stored secrets were lost: %+v", live.Tunnels[0].TLS)
+	}
+	onDisk, err := os.ReadFile(sup.GetConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(onDisk), tlsSecret) || !strings.Contains(string(onDisk), webPass) || strings.Contains(string(onDisk), config.MaskedSecret) {
+		t.Fatalf("the file on disk must hold the real secrets:\n%s", onDisk)
+	}
+
+	// A masked secret for an interface with nothing stored is an error, not a silent mask on disk.
+	renamed := strings.Replace(resp.YAML, `interface: wg0`, `interface: other0`, 1)
+	renamed = strings.Replace(renamed, `interface: "wg0"`, `interface: "other0"`, 1)
+	if w := post(renamed); w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a masked secret without a stored value, got %d", w.Code)
+	}
+}

@@ -3,8 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestParsePortRange(t *testing.T) {
@@ -255,5 +258,173 @@ func TestBackendDefaultsAndValidation(t *testing.T) {
 	SetDefaults(bad)
 	if err := Validate(bad); err == nil {
 		t.Error("unknown backend must be rejected")
+	}
+}
+
+func TestTLSDefaultsAndValidation(t *testing.T) {
+	good := func() *Config {
+		c := &Config{Mode: "server", Tunnels: []TunnelConfig{{
+			Interface: "wg0", PortRange: "20000-24999", RemotePortRange: "25000-29999", Iptables: true,
+			TLS: TLSConfig{Enabled: true, Secret: "0123456789abcdef"},
+		}}}
+		SetDefaults(c)
+		return c
+	}
+
+	c := good()
+	tl := c.Tunnels[0].TLS
+	if tl.PortRange != "20000-24999" || tl.RemotePortRange != "25000-29999" || tl.FallbackAfter != 15*time.Second || tl.DialInterval != time.Second {
+		t.Fatalf("unexpected defaults: %+v", tl)
+	}
+	if err := Validate(c); err != nil {
+		t.Fatalf("defaults must validate: %v", err)
+	}
+
+	bad := map[string]func(*Config){
+		"short secret":   func(c *Config) { c.Tunnels[0].TLS.Secret = "short" },
+		"passive":        func(c *Config) { f := false; c.Tunnels[0].Hunting = &f },
+		"bad range":      func(c *Config) { c.Tunnels[0].TLS.PortRange = "nonsense" },
+		"fast fallback":  func(c *Config) { c.Tunnels[0].TLS.FallbackAfter = time.Second },
+		"fast dial":      func(c *Config) { c.Tunnels[0].TLS.DialInterval = time.Millisecond },
+		"relay in range": func(c *Config) { c.Tunnels[0].TLS.RelayPort = 21000 },
+		"low relay":      func(c *Config) { c.Tunnels[0].TLS.RelayPort = 80 },
+		"bad sni":        func(c *Config) { c.Tunnels[0].TLS.SNI = "not a host" },
+		"empty alpn":     func(c *Config) { c.Tunnels[0].TLS.ALPN = []string{"h2", " "} },
+	}
+	for name, mutate := range bad {
+		c := good()
+		mutate(c)
+		if err := Validate(c); err == nil {
+			t.Errorf("%s: expected a validation error", name)
+		}
+	}
+
+	// A disabled block is never validated and gets no defaults.
+	off := &Config{Mode: "server", Tunnels: []TunnelConfig{{Interface: "wg0", TLS: TLSConfig{Secret: "x"}}}}
+	SetDefaults(off)
+	if err := Validate(off); err != nil || off.Tunnels[0].TLS.PortRange != "" {
+		t.Errorf("disabled tls must be left alone: %v %+v", err, off.Tunnels[0].TLS)
+	}
+
+	// TCP ranges of two iptables-managed tunnels must not overlap.
+	two := &Config{Mode: "server", Tunnels: []TunnelConfig{
+		{Interface: "wg0", PortRange: "20000-21000", Iptables: true, TLS: TLSConfig{Enabled: true, Secret: "0123456789abcdef", PortRange: "30000-31000"}},
+		{Interface: "wg1", PortRange: "22000-23000", Iptables: true, TLS: TLSConfig{Enabled: true, Secret: "0123456789abcdef", PortRange: "30500-31500"}},
+	}}
+	SetDefaults(two)
+	if err := Validate(two); err == nil {
+		t.Error("overlapping tls port ranges must be rejected")
+	}
+}
+
+const secretsYAML = `# my config
+mode: "client"   # keep this comment
+tunnels:
+  - interface: "wg0"
+    tls:
+      enabled: true
+      secret: "super-secret-value-123"   # shared with the peer
+  - interface: wg1
+    tls:
+      enabled: true
+      secret: 'plain-secret-value-456'
+  - interface: wg2
+    tls:
+      enabled: true
+      secret: unquoted-secret-value-789
+web:
+  enabled: true
+  password: "hunter2"
+`
+
+func TestMaskAndRestoreYAMLRoundTrip(t *testing.T) {
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(secretsYAML), &cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	masked := MaskYAML(secretsYAML)
+	for _, secret := range []string{"super-secret-value-123", "plain-secret-value-456", "unquoted-secret-value-789", "hunter2"} {
+		if strings.Contains(masked, secret) {
+			t.Fatalf("secret %q leaked into the masked YAML:\n%s", secret, masked)
+		}
+	}
+	if strings.Count(masked, MaskedSecret) != 4 {
+		t.Fatalf("expected four masked values:\n%s", masked)
+	}
+	if !strings.Contains(masked, "# keep this comment") || !strings.Contains(masked, "# shared with the peer") {
+		t.Fatalf("masking must leave comments and formatting alone:\n%s", masked)
+	}
+
+	restored, err := RestoreMaskedSecrets(masked, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Config
+	if err := yaml.Unmarshal([]byte(restored), &back); err != nil {
+		t.Fatalf("restored YAML must parse: %v\n%s", err, restored)
+	}
+	if back.Tunnels[0].TLS.Secret != "super-secret-value-123" || back.Tunnels[1].TLS.Secret != "plain-secret-value-456" ||
+		back.Tunnels[2].TLS.Secret != "unquoted-secret-value-789" || back.Web.Password != "hunter2" {
+		t.Fatalf("secrets not restored: %+v", back)
+	}
+	if !strings.Contains(restored, "# keep this comment") {
+		t.Fatal("restoring must leave comments alone")
+	}
+}
+
+func TestRestoreKeepsNewlyTypedSecretsAndRejectsUnknownInterfaces(t *testing.T) {
+	var old Config
+	_ = yaml.Unmarshal([]byte(secretsYAML), &old)
+
+	// A secret the user typed is not touched.
+	edited := strings.Replace(MaskYAML(secretsYAML), `secret: "********"   # shared`, `secret: "a-brand-new-secret-1"   # shared`, 1)
+	got, err := RestoreMaskedSecrets(edited, &old)
+	if err != nil || !strings.Contains(got, "a-brand-new-secret-1") {
+		t.Fatalf("typed secret must survive: err=%v\n%s", err, got)
+	}
+
+	// A masked secret on an interface that has no stored secret cannot be restored.
+	renamed := strings.Replace(MaskYAML(secretsYAML), `interface: "wg0"`, `interface: "renamed"`, 1)
+	if _, err := RestoreMaskedSecrets(renamed, &old); err == nil {
+		t.Fatal("expected an error for a masked secret without a stored value")
+	}
+
+	// Text without secrets is returned as is, and unparsable text does not panic.
+	if out := MaskYAML("mode: server\n"); out != "mode: server\n" {
+		t.Fatalf("got %q", out)
+	}
+	if out := MaskYAML(":\n  - ["); out != ":\n  - [" {
+		t.Fatalf("unparsable YAML must be returned unchanged, got %q", out)
+	}
+}
+
+func TestMaskSecretsConfig(t *testing.T) {
+	cfg := Config{
+		Web: WebConfig{Password: "pw"},
+		Tunnels: []TunnelConfig{
+			{Interface: "wg0", TLS: TLSConfig{Secret: "s0"}},
+			{Interface: "wg1"},
+		},
+	}
+	masked := MaskSecrets(cfg)
+	if masked.Web.Password != MaskedSecret || masked.Tunnels[0].TLS.Secret != MaskedSecret || masked.Tunnels[1].TLS.Secret != "" {
+		t.Fatalf("unexpected masking: %+v", masked)
+	}
+	if cfg.Tunnels[0].TLS.Secret != "s0" || cfg.Web.Password != "pw" {
+		t.Fatal("masking must not modify the live configuration")
+	}
+
+	back := masked
+	back.Tunnels = append([]TunnelConfig(nil), masked.Tunnels...)
+	if err := RestoreMaskedSecretsConfig(&back, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if back.Web.Password != "pw" || back.Tunnels[0].TLS.Secret != "s0" {
+		t.Fatalf("restore failed: %+v", back)
+	}
+	gone := Config{Tunnels: []TunnelConfig{{Interface: "other", TLS: TLSConfig{Secret: MaskedSecret}}}}
+	if err := RestoreMaskedSecretsConfig(&gone, &cfg); err == nil {
+		t.Fatal("expected an error when there is nothing stored for the interface")
 	}
 }

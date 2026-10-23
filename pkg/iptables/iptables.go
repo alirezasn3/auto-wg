@@ -68,11 +68,18 @@ func FormatIptablesPortRange(spec string) (string, error) {
 	return fmt.Sprintf("%d:%d", start, end), nil
 }
 
-// ApplyForwardingRule installs the NAT PREROUTING REDIRECT rule for IPv4 and IPv6 for a given interface:
-// iptables/ip6tables -t nat -A PREROUTING -p udp --dport <start>:<end> -m comment --comment "autowg-<iface>" -j REDIRECT --to-ports <targetPort>
+// ApplyForwardingRule installs the UDP NAT PREROUTING REDIRECT rule of a WireGuard interface.
 func (m *Manager) ApplyForwardingRule(iface string, portRangeSpec string, targetPort int) error {
+	return m.ApplyRedirect(iface, "udp", portRangeSpec, targetPort)
+}
+
+// ApplyRedirect installs the NAT PREROUTING REDIRECT rule for IPv4 and IPv6 under a key (an interface
+// name, or "<iface>-tls" for the TCP rule of the TLS path):
+// iptables/ip6tables -t nat -A PREROUTING -p <proto> --dport <start>:<end> -m comment --comment "autowg-<key>" -j REDIRECT --to-ports <targetPort>
+func (m *Manager) ApplyRedirect(key, proto, portRangeSpec string, targetPort int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	iface := key
 
 	if !m.isLinux {
 		m.log.Warn("IPTABLES", "Skipping iptables configuration for %s (non-Linux or iptables binary missing)", iface)
@@ -86,7 +93,7 @@ func (m *Manager) ApplyForwardingRule(iface string, portRangeSpec string, target
 
 	comment := fmt.Sprintf("autowg-%s", iface)
 	ruleSpec := []string{
-		"-p", "udp",
+		"-p", proto,
 		"--dport", dport,
 		"-m", "comment",
 		"--comment", comment,
@@ -111,10 +118,10 @@ func (m *Manager) ApplyForwardingRule(iface string, portRangeSpec string, target
 			if err := m.ipt4.AppendUnique("nat", "PREROUTING", ruleSpec...); err != nil {
 				m.log.Warn("IPTABLES", "[%s] Failed to append IPv4 rule: %v", iface, err)
 			} else {
-				m.log.Info("IPTABLES", "[%s] Applied IPv4 NAT REDIRECT: UDP dport %s -> WireGuard port %d", iface, dport, targetPort)
+				m.log.Info("IPTABLES", "[%s] Applied IPv4 NAT REDIRECT: %s dport %s -> local port %d", iface, proto, dport, targetPort)
 			}
 		} else if exists {
-			m.log.Info("IPTABLES", "[%s] IPv4 forwarding rule already active: UDP %s -> WireGuard port %d", iface, dport, targetPort)
+			m.log.Info("IPTABLES", "[%s] IPv4 forwarding rule already active: %s %s -> local port %d", iface, proto, dport, targetPort)
 		}
 	}
 
@@ -125,10 +132,10 @@ func (m *Manager) ApplyForwardingRule(iface string, portRangeSpec string, target
 			if err := m.ipt6.AppendUnique("nat", "PREROUTING", ruleSpec...); err != nil {
 				m.log.Warn("IPTABLES", "[%s] Failed to append IPv6 rule (ip6tables nat might not be supported in kernel): %v", iface, err)
 			} else {
-				m.log.Info("IPTABLES", "[%s] Applied IPv6 NAT REDIRECT: UDP dport %s -> WireGuard port %d", iface, dport, targetPort)
+				m.log.Info("IPTABLES", "[%s] Applied IPv6 NAT REDIRECT: %s dport %s -> local port %d", iface, proto, dport, targetPort)
 			}
 		} else if exists {
-			m.log.Info("IPTABLES", "[%s] IPv6 forwarding rule already active: UDP %s -> WireGuard port %d", iface, dport, targetPort)
+			m.log.Info("IPTABLES", "[%s] IPv6 forwarding rule already active: %s %s -> local port %d", iface, proto, dport, targetPort)
 		}
 	}
 

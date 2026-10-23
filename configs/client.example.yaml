@@ -55,6 +55,16 @@ tunnels:
       failure_threshold: 3
     history_file: "history-wgBridge0.json"
     iptables: true
+    # UDP-over-TLS fallback: a second path for when direct WireGuard is blocked. Needs Auto-WG with
+    # the same secret on the other peer too. TCP ranges default to the UDP ranges above.
+    tls:
+      enabled: false
+      secret: "change-me-to-a-long-random-string"
+      # port_range: "443-8443"
+      # remote_port_range: "443-8443"
+      fallback_after: 15s
+      # sni: "www.example.com"
+      # alpn: ["h2", "http/1.1"]
 
   - interface: "wgBridge1"
     name: "Upstream-Backup"

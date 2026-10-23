@@ -302,18 +302,17 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
-			_, _ = w.Write([]byte(rawYml))
+			_, _ = w.Write([]byte(config.MaskYAML(rawYml)))
 			return
 		}
 
 		// Default GET: return JSON payload with file path, raw YAML, and parsed configuration
-		cfg := s.sup.GetConfig()
-		cfgCopy := cfg
-		if cfgCopy.Web.Password != "" {
-			cfgCopy.Web.Password = "********"
-		}
+		cfgCopy := config.MaskSecrets(s.sup.GetConfig())
 
 		rawYml, err := s.sup.GetRawConfigFile()
+		if err == nil {
+			rawYml = config.MaskYAML(rawYml)
+		}
 		if err != nil {
 			s.log.Warn("WEB", "Could not read raw config file: %v", err)
 			if yBytes, mErr := yaml.Marshal(&cfgCopy); mErr == nil {
@@ -368,8 +367,14 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				current := s.sup.GetConfig()
-				if newCfg.Web.Password == "********" || newCfg.Web.Password == "" {
+				if newCfg.Web.Password == "" {
 					newCfg.Web.Password = current.Web.Password
+				}
+				if err := config.RestoreMaskedSecretsConfig(&newCfg, &current); err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": err.Error()})
+					return
 				}
 				ymlBytes, mErr := yaml.Marshal(&newCfg)
 				if mErr != nil {

@@ -11,12 +11,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"auto-wg/pkg/config"
 	"auto-wg/pkg/iptables"
 	"auto-wg/pkg/logger"
 	"auto-wg/pkg/ping"
+	"auto-wg/pkg/tlstun"
 	"auto-wg/pkg/wg"
 )
 
@@ -76,6 +78,19 @@ type StatusReport struct {
 	RemotePortRange    string            `json:"remote_port_range"`
 	Hunting            bool              `json:"hunting"`
 	IsPrimary          bool              `json:"is_primary"`
+
+	// UDP-over-TLS fallback path
+	Path           string    `json:"path"` // "direct" or "tls": where WireGuard's endpoint points
+	TLSEnabled     bool      `json:"tls_enabled"`
+	TLSConnected   bool      `json:"tls_connected"`
+	TLSDirection   string    `json:"tls_direction,omitempty"` // "dialed" or "accepted"
+	TLSRemote      string    `json:"tls_remote,omitempty"`
+	TLSListenPort  int       `json:"tls_listen_port,omitempty"`
+	TLSRelayPort   int       `json:"tls_relay_port,omitempty"`
+	TLSBytesRx     uint64    `json:"tls_bytes_rx"`
+	TLSBytesTx     uint64    `json:"tls_bytes_tx"`
+	TLSLastError   string    `json:"tls_last_error,omitempty"`
+	LastPathSwitch time.Time `json:"last_path_switch"`
 }
 
 type HistoryState struct {
@@ -134,6 +149,16 @@ type Hunter struct {
 	lastHuntReason       string
 	iptablesActive       bool
 	manualTrigger        chan string
+
+	// UDP-over-TLS fallback path (path.go)
+	ctx            context.Context
+	tun            tlsLink
+	newTunnel      func(config.TLSConfig, tlstun.Deps) tlsLink
+	activePath     string
+	deadSince      time.Time
+	lastPathSwitch time.Time
+	wgListenPort   atomic.Int32
+	now            func() time.Time
 }
 
 func New(tunnelCfg config.TunnelConfig, wgCtrl wg.Backend, iptMgr *iptables.Manager, log *logger.Logger, onStateChange StateChangeHandler) *Hunter {
@@ -212,9 +237,19 @@ func New(tunnelCfg config.TunnelConfig, wgCtrl wg.Backend, iptMgr *iptables.Mana
 		lastDirection:     "Local ⇄ Remote",
 		events:            make([]ConnectionEvent, 0, 50),
 		manualTrigger:     make(chan string, 10),
+		newTunnel:         newTLSTunnel,
+		activePath:        PathDirect,
+		now:               time.Now,
 	}
 	h.loadHistory()
 	return h
+}
+
+// setLocalPort records WireGuard's listen port. The copy in wgListenPort lets the TLS relay read it
+// without taking the hunter lock on every packet.
+func (h *Hunter) setLocalPort(p int) {
+	h.localPort = p
+	h.wgListenPort.Store(int32(p))
 }
 
 func (h *Hunter) setState(newState string) {
@@ -362,7 +397,11 @@ func (h *Hunter) addEvent(eventType string, direction string, initiator string, 
 // Start runs the autonomous monitoring and hunting loop.
 func (h *Hunter) Start(ctx context.Context) {
 	h.log.Info("HUNTER", "[%s] Starting Autonomous WireGuard Hunter (Zero-Negotiator Mode)", h.cfg.Interface)
+	h.mu.Lock()
+	h.ctx = ctx
+	h.mu.Unlock()
 	defer func() {
+		h.stopTLS()
 		_ = h.SaveHistory()
 	}()
 
@@ -371,6 +410,9 @@ func (h *Hunter) Start(ctx context.Context) {
 
 	// 2. Apply iptables rule if enabled
 	h.applyIptablesRule()
+
+	// 2b. Start the UDP-over-TLS path (listener, dial loop, relay) if configured
+	h.startTLS()
 
 	// 3. Save initial history state so the file exists on disk immediately
 	_ = h.SaveHistory()
@@ -436,7 +478,7 @@ func (h *Hunter) initializeInterface() {
 		if err == nil {
 			if err := h.wgCtrl.UpdateListenPort(iface, newPort); err == nil {
 				h.mu.Lock()
-				h.localPort = newPort
+				h.setLocalPort(newPort)
 				h.mu.Unlock()
 				h.log.Info("HUNTER", "[%s] Auto-assigned WireGuard listen port to :%d (from port_range %s)", iface, newPort, localRange)
 			} else {
@@ -445,7 +487,7 @@ func (h *Hunter) initializeInterface() {
 		}
 	} else if dev.ListenPort > 0 {
 		h.mu.Lock()
-		h.localPort = dev.ListenPort
+		h.setLocalPort(dev.ListenPort)
 		h.mu.Unlock()
 	}
 
@@ -559,7 +601,18 @@ func (h *Hunter) tick(ctx context.Context) {
 		h.peerPubKey = h.cfg.PeerPublicKey
 	}
 
-	if dev.PeerEndpointIP != "" {
+	// While the TLS path is active WireGuard's endpoint is the loopback relay, which is not a peer
+	// address: it must neither become the target IP nor the remote port.
+	onRelay := h.relayEndpointLocked(dev.PeerEndpointIP, dev.PeerPort)
+	h.syncPathLocked(onRelay)
+	isLoopbackEndpoint := onRelay
+	if ip := net.ParseIP(strings.Trim(dev.PeerEndpointIP, "[]")); ip != nil && ip.IsLoopback() {
+		isLoopbackEndpoint = true
+	}
+
+	if isLoopbackEndpoint {
+		// keep the last direct target
+	} else if dev.PeerEndpointIP != "" {
 		cleanDevIP := strings.Trim(dev.PeerEndpointIP, "[]")
 		found := false
 		for idx, tip := range h.targetIPs {
@@ -585,8 +638,10 @@ func (h *Hunter) tick(ctx context.Context) {
 	} else if h.targetIP == "" && h.cfg.TargetIP != "" {
 		h.targetIP = strings.Trim(h.cfg.TargetIP, "[]")
 	}
-	h.localPort = dev.ListenPort
-	h.remotePort = dev.PeerPort
+	h.setLocalPort(dev.ListenPort)
+	if !isLoopbackEndpoint {
+		h.remotePort = dev.PeerPort
+	}
 	h.lastHandshake = dev.LastHandshake
 	h.handshakeAge = dev.HandshakeAge
 	h.txBytes = dev.TransmitBytes
@@ -618,6 +673,10 @@ func (h *Hunter) tick(ctx context.Context) {
 	}
 
 	isPrimary := dev.PublicKey < dev.PeerPublicKey
+	if h.tun != nil {
+		h.tun.SetPrimary(isPrimary)
+		h.tun.SetTargets(h.tlsTargetsLocked())
+	}
 
 	hasHandshakeEver := !dev.LastHandshake.IsZero()
 	isHandshakeFresh := hasHandshakeEver && dev.HandshakeAge <= timeout
@@ -633,7 +692,7 @@ func (h *Hunter) tick(ctx context.Context) {
 				h.pingVerified = true
 				h.failedPings = 0
 				if h.state == StateHunting || h.state == StateStalled {
-					remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
+					remoteEndpointStr := h.remoteDescLocked()
 					h.log.Info("HUNTER", "===============================================================")
 					h.log.Info("HUNTER", " [%s] WIREGUARD CONNECTED! In-tunnel ping to %s verified (5-tuple: :%d -> %s)",
 						iface, pingTarget, h.localPort, remoteEndpointStr)
@@ -653,9 +712,10 @@ func (h *Hunter) tick(ctx context.Context) {
 					h.lastConnectedAt = time.Now()
 					dir := "Local ⇄ Remote"
 					h.lastDirection = dir
-					remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
+					remoteEndpointStr := h.remoteDescLocked()
 					h.addEvent(StateConnected, dir, "Initial Ping", fmt.Sprintf("Ping verified: :%d -> %s", h.localPort, remoteEndpointStr), 0)
 				}
+				h.deadSince = time.Time{}
 				h.setState(StateConnected)
 				h.mu.Unlock()
 				return
@@ -690,7 +750,7 @@ func (h *Hunter) tick(ctx context.Context) {
 		h.pingVerified = false
 		if isHandshakeFresh || (hasHandshakeEver && rxProgress) {
 			if h.state == StateHunting || h.state == StateStalled {
-				remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
+				remoteEndpointStr := h.remoteDescLocked()
 				h.log.Info("HUNTER", "===============================================================")
 				h.log.Info("HUNTER", " [%s] WIREGUARD CONNECTED! Working 5-tuple: :%d -> %s (Handshake: %v ago)",
 					iface, h.localPort, remoteEndpointStr, dev.HandshakeAge.Round(time.Millisecond))
@@ -714,11 +774,12 @@ func (h *Hunter) tick(ctx context.Context) {
 				}
 				dir := "Local ⇄ Remote"
 				h.lastDirection = dir
-				remoteEndpointStr := net.JoinHostPort(h.targetIP, strconv.Itoa(h.remotePort))
+				remoteEndpointStr := h.remoteDescLocked()
 				h.log.Info("HUNTER", "[%s] Tunnel healthy & active: :%d -> %s (Handshake: %v ago)",
 					iface, h.localPort, remoteEndpointStr, dev.HandshakeAge.Round(time.Millisecond))
 				h.addEvent(StateConnected, dir, "Initial Handshake", fmt.Sprintf("Link active: :%d -> %s", h.localPort, remoteEndpointStr), 0)
 			}
+			h.deadSince = time.Time{}
 			h.setState(StateConnected)
 			h.failedPings = 0
 			h.mu.Unlock()
@@ -752,7 +813,23 @@ func (h *Hunter) tick(ctx context.Context) {
 
 	h.setState(StateHunting)
 	attempt := h.currentAttempt
+	if h.deadSince.IsZero() {
+		h.deadSince = h.now()
+	}
+	act, holdDirect := h.planFailoverLocked()
 	h.mu.Unlock()
+
+	// With a TLS path configured, a link that stays dead moves to the other path before (or instead of)
+	// hunting new direct ports; while the TLS path is active direct hunting is held back so it cannot
+	// flip the endpoint away from the relay.
+	if act != pathStay {
+		h.switchPath(act, stallReason)
+		return
+	}
+	if holdDirect {
+		h.log.Debug("HUNTER", "[%s] Link dead on the TLS path; waiting for it to recover or the fallback timer", iface)
+		return
+	}
 
 	// Role-staggered turn coordination
 	nowUnix := time.Now().Unix()
@@ -797,6 +874,9 @@ func (h *Hunter) determineDirection(currentRemotePort int) (string, string) {
 }
 
 func (h *Hunter) executeHunt(reason string) {
+	if h.reconnectTLSIfActive() {
+		return
+	}
 	h.mu.RLock()
 	configuredTargets := make([]string, len(h.configuredTargets))
 	copy(configuredTargets, h.configuredTargets)
@@ -866,7 +946,7 @@ func (h *Hunter) executeHunt(reason string) {
 		h.log.Error("HUNTER", "[%s] UpdateListenPort to %d failed: %v", iface, newLocalPort, err)
 	} else {
 		h.mu.Lock()
-		h.localPort = newLocalPort
+		h.setLocalPort(newLocalPort)
 		h.mu.Unlock()
 	}
 
@@ -914,6 +994,10 @@ func (h *Hunter) TriggerRebind() error {
 		return fmt.Errorf("rebind is disabled on passive tunnel %s", h.cfg.Interface)
 	}
 
+	if h.reconnectTLSIfActive() {
+		return nil
+	}
+
 	h.mu.Lock()
 	iface := h.cfg.Interface
 	localRange := h.cfg.PortRange
@@ -935,7 +1019,7 @@ func (h *Hunter) TriggerRebind() error {
 	}
 
 	h.mu.Lock()
-	h.localPort = newPort
+	h.setLocalPort(newPort)
 	h.pingVerified = false
 	h.mu.Unlock()
 	return nil
@@ -967,7 +1051,7 @@ func (h *Hunter) GetStatus() StatusReport {
 		lastDir = "Local ⇄ Remote"
 	}
 
-	return StatusReport{
+	report := StatusReport{
 		Interface:          h.cfg.Interface,
 		Backend:            h.cfg.Backend,
 		Name:               h.cfg.Name,
@@ -1001,7 +1085,21 @@ func (h *Hunter) GetStatus() StatusReport {
 		RemotePortRange:    h.cfg.RemotePortRange,
 		Hunting:            h.huntingEnabled,
 		IsPrimary:          isPrimary,
+		Path:               h.activePath,
+		TLSEnabled:         h.cfg.TLS.Enabled,
+		LastPathSwitch:     h.lastPathSwitch,
 	}
+	if ts, ok := h.tlsStatusLocked(); ok {
+		report.TLSConnected = ts.Connected
+		report.TLSDirection = ts.Direction
+		report.TLSRemote = ts.Remote
+		report.TLSListenPort = ts.ListenPort
+		report.TLSRelayPort = ts.RelayPort
+		report.TLSBytesRx = ts.BytesRx
+		report.TLSBytesTx = ts.BytesTx
+		report.TLSLastError = ts.LastError
+	}
+	return report
 }
 
 // GetInterface returns the WireGuard interface name.
@@ -1020,6 +1118,7 @@ func (h *Hunter) GetState() string {
 func (h *Hunter) UpdateConfig(newCfg config.TunnelConfig) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	oldCfg := h.cfg
 
 	h.cfg.Name = newCfg.Name
 	if newCfg.CheckInterval > 0 {
@@ -1111,6 +1210,14 @@ func (h *Hunter) UpdateConfig(newCfg config.TunnelConfig) {
 	} else if !h.cfg.Iptables && h.iptMgr != nil {
 		_ = h.iptMgr.RemoveRule(h.cfg.Interface)
 		h.iptablesActive = false
+	}
+
+	// Rebuild the TLS path when its settings (or the ranges and iptables flag it depends on) changed
+	h.cfg.TLS = newCfg.TLS
+	if tlsConfigChanged(oldCfg, h.cfg) {
+		h.restoreDirectLocked()
+		h.stopTLSLocked()
+		h.startTLSLocked()
 	}
 
 	h.log.Info("HUNTER", "[%s] Config updated live: hunting=%v, port_range=%s, targets=%v",

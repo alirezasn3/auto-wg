@@ -113,6 +113,11 @@ class AutoWGApp {
     this.iptablesStateText = document.getElementById('iptablesStateText');
     this.iptablesSubtext = document.getElementById('iptablesSubtext');
     this.iptablesRange = document.getElementById('iptablesRange');
+    this.rowPath = document.getElementById('rowPath');
+    this.pathState = document.getElementById('pathState');
+    this.rowTlsLink = document.getElementById('rowTlsLink');
+    this.tlsLinkState = document.getElementById('tlsLinkState');
+    this.bridgeProtoBadge = document.getElementById('bridgeProtoBadge');
     this.tunnelPingTarget = document.getElementById('tunnelPingTarget');
     this.failedPingsCount = document.getElementById('failedPingsCount');
 
@@ -503,6 +508,7 @@ class AutoWGApp {
       this.iptablesSubtext.textContent = 'Disabled / Non-Linux';
     }
     this.iptablesRange.textContent = data.local_port_range || '--';
+    this.renderPath(data);
     this.tunnelPingTarget.textContent = data.in_tunnel_ping_target || 'Auto-detecting...';
     if (!data.ping_enabled) {
       this.failedPingsCount.textContent = 'Disabled';
@@ -523,6 +529,39 @@ class AutoWGApp {
 
     // Connection Events History
     this.renderEvents(data.events);
+  }
+
+  renderPath(data) {
+    const enabled = !!data.tls_enabled;
+    const onTls = enabled && data.path === 'tls';
+    if (this.rowPath) this.rowPath.style.display = enabled ? '' : 'none';
+    if (this.rowTlsLink) this.rowTlsLink.style.display = enabled ? '' : 'none';
+    if (this.bridgeProtoBadge) {
+      this.bridgeProtoBadge.textContent = onTls ? 'TLS' : 'UDP';
+      this.bridgeProtoBadge.classList.toggle('path-tls', onTls);
+    }
+    if (!enabled) return;
+
+    if (this.pathState) {
+      this.pathState.textContent = onTls ? `TLS (relay :${data.tls_relay_port || '?'})` : 'Direct UDP';
+      this.pathState.style.color = onTls ? 'var(--accent-text)' : '';
+    }
+    if (this.tlsLinkState) {
+      if (data.tls_connected) {
+        this.tlsLinkState.textContent = `Up · ${data.tls_direction || ''} ${data.tls_remote || ''} · ↓ ${formatBytes(data.tls_bytes_rx)} ↑ ${formatBytes(data.tls_bytes_tx)}`;
+        this.tlsLinkState.title = '';
+        this.tlsLinkState.style.color = 'var(--success)';
+      } else {
+        const authProblem = /authenticat/i.test(data.tls_last_error || '');
+        this.tlsLinkState.textContent = authProblem ? 'Down · authentication failed, check tls.secret' : 'Down · dialing';
+        this.tlsLinkState.title = data.tls_last_error || '';
+        this.tlsLinkState.style.color = 'var(--warning)';
+      }
+    }
+    if (onTls) {
+      if (this.btnHunt) this.btnHunt.title = 'Reconnect the TLS link';
+      if (this.btnRebind) this.btnRebind.title = 'Reconnect the TLS link on a new listener port';
+    }
   }
 
   renderTunnelSwitcher(fullData) {
@@ -631,8 +670,9 @@ class AutoWGApp {
     let html = '';
     for (const evt of events) {
       const isConnected = evt.type === 'CONNECTED';
-      const typeClass = isConnected ? 'connected' : 'disconnected';
-      const typeLabel = isConnected ? 'Connected' : 'Disconnected';
+      const isPath = evt.type === 'PATH';
+      const typeClass = isPath ? 'path' : (isConnected ? 'connected' : 'disconnected');
+      const typeLabel = isPath ? 'Path switch' : (isConnected ? 'Connected' : 'Disconnected');
 
       let dirClass = 'bidirectional';
       if (evt.direction && evt.direction.includes('Local → Remote')) {
@@ -1084,6 +1124,7 @@ class AutoWGApp {
     const isHunting = tunnel.hunting !== false;
     const isIptables = tunnel.iptables !== false;
     const ping = tunnel.tunnel_ping || {};
+    const tls = tunnel.tls || {};
     const text = (cls, value, placeholder = '') =>
       `<input type="text" class="form-input ${cls}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" spellcheck="false">`;
     const num = (cls, value, placeholder = '') =>
@@ -1116,6 +1157,30 @@ class AutoWGApp {
           <div class="toggle-row">
             ${formToggle('t-hunting', isHunting, 'Rotate ports automatically when the link stalls')}
             ${formToggle('t-iptables', isIptables, 'Manage the iptables REDIRECT rule')}
+          </div>
+        </div>
+
+        <div class="group group-tls ${tls.enabled ? '' : 'off'}">
+          <div class="group-label">
+            UDP over TLS fallback
+            ${formToggle('t-tls-enabled', !!tls.enabled, 'Enabled')}
+          </div>
+          <p class="group-note">A second path for when direct WireGuard is blocked: both peers keep a TLS connection open and WireGuard switches between the two paths. Needs Auto-WG with the same secret on both peers.</p>
+          <div class="group-fields">
+            ${formField('Shared secret', secretInput(tls.secret || ''), 'Identical on both peers, at least 16 characters. It is masked after saving, so read it from the config file when setting up the other peer.')}
+            <div class="form-grid-2">
+              ${formField('TCP port range (local)', text('t-tls-port-range', tls.port_range || '', 'same as the UDP range'), 'Every incoming TCP port in this range is redirected to the TLS listener: keep other services out of it')}
+              ${formField('TCP port range (remote)', text('t-tls-remote-range', tls.remote_port_range || '', 'same as the remote UDP range'), 'Ports tried on the peer')}
+            </div>
+            <div class="form-grid-3">
+              ${formField('Switch path after', text('t-tls-fallback', formatDuration(tls.fallback_after, '15s'), '15s'), 'How long a path must be dead')}
+              ${formField('Dial interval', text('t-tls-dial', formatDuration(tls.dial_interval, '1s'), '1s'))}
+              ${formField('Relay port', num('t-tls-relay', tls.relay_port || 0, '0'), '0 = automatic (loopback UDP)')}
+            </div>
+            <div class="form-grid-2">
+              ${formField('SNI (optional)', text('t-tls-sni', tls.sni || '', 'www.example.com'), 'Server name sent in the TLS handshake')}
+              ${formField('ALPN (optional)', text('t-tls-alpn', (tls.alpn || []).join(', '), 'h2, http/1.1'), 'Comma separated')}
+            </div>
           </div>
         </div>
 
@@ -1175,6 +1240,20 @@ class AutoWGApp {
       sw?.addEventListener('change', () => group?.classList.toggle('off', !sw.checked));
     };
     bindGroupSwitch('.t-ping-enabled', '.group-ping');
+    bindGroupSwitch('.t-tls-enabled', '.group-tls');
+
+    // Secret field: generate a random secret (shown in clear so it can be copied) or reveal the value
+    const secretEl = card.querySelector('.t-tls-secret');
+    card.querySelector('.btn-gen-secret')?.addEventListener('click', () => {
+      const bytes = crypto.getRandomValues(new Uint8Array(24));
+      secretEl.value = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_');
+      secretEl.type = 'text';
+      secretEl.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    card.querySelector('.btn-show-secret')?.addEventListener('click', (e) => {
+      secretEl.type = secretEl.type === 'password' ? 'text' : 'password';
+      e.currentTarget.textContent = secretEl.type === 'password' ? 'Show' : 'Hide';
+    });
 
     // Remove lives inside <summary>, so keep the click from folding the card
     const btnRemove = card.querySelector('.btn-remove-tunnel');
@@ -1237,6 +1316,19 @@ class AutoWGApp {
         const n = parseInt(card.querySelector(sel)?.value, 10);
         return Number.isNaN(n) ? def : n;
       };
+      const val = (sel) => card.querySelector(sel)?.value.trim() || '';
+      const tlsCfg = {
+        enabled: card.querySelector('.t-tls-enabled')?.checked ?? false,
+        secret: card.querySelector('.t-tls-secret')?.value || '',
+        port_range: val('.t-tls-port-range'),
+        remote_port_range: val('.t-tls-remote-range'),
+        relay_port: intVal('.t-tls-relay', 0),
+        fallback_after: val('.t-tls-fallback') || '15s',
+        dial_interval: val('.t-tls-dial') || '1s',
+        sni: val('.t-tls-sni'),
+        alpn: val('.t-tls-alpn').split(',').map(x => x.trim()).filter(x => x.length > 0)
+      };
+
       const postUpRaw = card.querySelector('.t-post-up')?.value || '';
       const postUp = postUpRaw.split('\n').map(s => s.trim()).filter(s => s.length > 0);
       const preDownRaw = card.querySelector('.t-pre-down')?.value || '';
@@ -1261,7 +1353,8 @@ class AutoWGApp {
           target_ip: pingTarget,
           interval: pingInterval,
           failure_threshold: pingThreshold
-        }
+        },
+        tls: tlsCfg
       };
       if (historyFile) tunnelObj.history_file = historyFile;
       if (postUp.length > 0) tunnelObj.post_up = postUp;
@@ -1349,6 +1442,20 @@ class AutoWGApp {
         if (t.tunnel_ping.target_ip) lines.push(`      target_ip: "${t.tunnel_ping.target_ip}"`);
         if (t.tunnel_ping.interval) lines.push(`      interval: "${t.tunnel_ping.interval}"`);
         if (t.tunnel_ping.failure_threshold) lines.push(`      failure_threshold: ${t.tunnel_ping.failure_threshold}`);
+      }
+
+      const tl = t.tls;
+      if (tl && (tl.enabled || tl.secret)) {
+        lines.push('    tls:');
+        lines.push(`      enabled: ${tl.enabled ? 'true' : 'false'}`);
+        if (tl.secret) lines.push(`      secret: ${JSON.stringify(tl.secret)}`);
+        if (tl.port_range) lines.push(`      port_range: "${tl.port_range}"`);
+        if (tl.remote_port_range) lines.push(`      remote_port_range: "${tl.remote_port_range}"`);
+        if (tl.relay_port > 0) lines.push(`      relay_port: ${tl.relay_port}`);
+        if (tl.fallback_after) lines.push(`      fallback_after: "${tl.fallback_after}"`);
+        if (tl.dial_interval) lines.push(`      dial_interval: "${tl.dial_interval}"`);
+        if (tl.sni) lines.push(`      sni: ${JSON.stringify(tl.sni)}`);
+        if (tl.alpn && tl.alpn.length > 0) lines.push(`      alpn: [${tl.alpn.map(a => JSON.stringify(a)).join(', ')}]`);
       }
 
       if (t.check_interval && t.check_interval !== '3s') lines.push(`    check_interval: "${t.check_interval}"`);
@@ -1602,6 +1709,10 @@ function backendSelect(current) {
   const value = current === 'amneziawg' ? 'amneziawg' : 'wireguard';
   const option = (v, label) => `<option value="${v}" ${v === value ? 'selected' : ''}>${label}</option>`;
   return `<select class="form-input t-backend">${option('wireguard', 'WireGuard')}${option('amneziawg', 'AmneziaWG')}</select>`;
+}
+
+function secretInput(value) {
+  return `<div class="input-row"><input type="password" class="form-input t-tls-secret" value="${escapeHtml(value)}" placeholder="Same value on both peers" spellcheck="false" autocomplete="off"><button type="button" class="btn btn-secondary btn-sm btn-gen-secret">Generate</button><button type="button" class="btn btn-ghost btn-sm btn-show-secret">Show</button></div>`;
 }
 
 function formToggle(cls, checked, text) {

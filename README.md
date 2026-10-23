@@ -15,6 +15,7 @@ Auto-WG natively supports two primary deployment topologies:
 * **Zero-Negotiator Autonomous Hunting**: No external signaling relays, Cloudflare Workers, or rendezvous servers needed. Both peers monitor link state and recover 100% autonomously.
 * **Pure Netlink/UAPI WireGuard Control (`wgctrl`)**: Interacts directly with the Linux WireGuard kernel module via native Netlink without spawning sub-processes.
 * **AmneziaWG Support**: Each tunnel can run on stock WireGuard (default) or on [AmneziaWG](https://github.com/amnezia-vpn/amneziawg-go) (`backend: "amneziawg"`), whose junk packets, padded handshakes and custom headers defeat DPI that fingerprints the 148/92-byte WireGuard handshake. Stock and AmneziaWG tunnels can be mixed. See [AmneziaWG](#-amneziawg).
+* **UDP-over-TLS Fallback**: Any tunnel can carry a second, TCP/TLS-shaped path (`tls:` block). Both peers keep a TLS connection open (each side listens on a TCP port range and dials the peer's), and WireGuard switches between the direct and the TLS path when one of them stops working. Works with stock WireGuard and AmneziaWG. See [UDP over TLS](#-udp-over-tls-fallback).
 * **Multi-Interface Architecture**: Supervise multiple tunnels simultaneously on a single machine, with isolated port ranges, independent health probes, and per-tunnel persistent state.
 * **Upstream Route Failover (Policy Routing / Table 200)**: In client mode, Auto-WG monitors upstream health and dynamically updates default routes in a designated routing table (e.g. `table 200`) using `ip route replace default dev <iface> table 200`. The host's main routing table and SSH sessions are never disrupted.
 * **PostUp & PreDown Lifecycle Hooks**: Execute custom shell commands (policy routing rules, iptables MASQUERADE, UFW forwardings) automatically upon daemon start and shutdown.
@@ -248,6 +249,15 @@ sudo ./autowg --uninstall
 | `tunnel_ping.enabled` | bool | `true` | Active ICMP ping verification before hunting |
 | `tunnel_ping.target_ip` | string | `""` | In-tunnel IP of the remote peer to ping |
 | `tunnel_ping.failure_threshold` | int | `3` | Consecutive ping timeouts before declaring link down |
+| `tls.enabled` | bool | `false` | Enable the UDP-over-TLS fallback path (needs Auto-WG on both peers; not for passive tunnels) |
+| `tls.secret` | string | **Required** | Shared secret, identical on both peers, at least 16 characters |
+| `tls.port_range` | string | tunnel `port_range` | Local **TCP** range, redirected by iptables to the TLS listener |
+| `tls.remote_port_range` | string | tunnel `remote_port_range` | Peer's **TCP** range to dial |
+| `tls.fallback_after` | duration | `15s` | How long the active path must be dead before switching to the other |
+| `tls.dial_interval` | duration | `1s` | Pause between dial attempts while no TLS link is up |
+| `tls.relay_port` | int | `0` (auto) | Loopback UDP port WireGuard talks to while the TLS path is active |
+| `tls.sni` | string | `""` | Optional server name sent in the TLS handshake (also the certificate name) |
+| `tls.alpn` | list of string | `[]` | Optional ALPN protocols, e.g. `["h2", "http/1.1"]` |
 | `history_file` | string | `""` | Persistent history file path (e.g. `"history-wg0.json"`, or `"off"` to disable) |
 | `post_up` | list of string | `[]` | Tunnel-specific shell commands executed after this interface starts |
 | `pre_down` | list of string | `[]` | Tunnel-specific shell commands executed before this interface stops |
@@ -367,6 +377,45 @@ Wants=awg-quick@wgBridge0.service
 ```
 
 If Auto-WG does start first it keeps retrying until the interface appears, but it picks the initial listen port and endpoint at startup, so the ordering above is the reliable setup. Switching a tunnel's backend in the web editor recreates that tunnel.
+
+---
+
+## 🔐 UDP over TLS fallback
+
+When DPI blocks the direct WireGuard path, a tunnel can fall back to carrying its packets inside a TLS connection. This is configured **inside** the WireGuard tunnel, so the interface, keys and routes stay the same:
+
+```yaml
+tunnels:
+  - interface: "wg0"
+    port_range: "20000-24999"          # UDP, direct path
+    remote_port_range: "20000-24999"
+    target_ips: ["198.51.100.1"]
+    tls:
+      enabled: true
+      secret: "<the same long random string on both peers>"
+      port_range: "443-8443"           # TCP; optional, defaults to port_range
+      remote_port_range: "443-8443"    # optional, defaults to remote_port_range
+      fallback_after: 15s
+      sni: "www.example.com"           # optional
+      alpn: ["h2", "http/1.1"]         # optional
+```
+
+**How it works**
+
+* **Both peers listen and dial.** Each side opens a TCP listener on a random port of `tls.port_range` (the whole range is redirected to it by iptables, exactly like the UDP range) and keeps dialing a random port of the peer's `tls.remote_port_range`, from a random source port of its own range. Whichever connection comes up first is used, so it works when only one direction is reachable. If two connections come up at once, both sides keep the one the primary peer (the lower public key) dialed.
+* **The TLS link stays up in the background** (hot standby). While it is idle it only exchanges small keepalives.
+* **WireGuard talks to a loopback relay while the TLS path is active.** Switching paths is only a change of the peer endpoint (the real peer, or `127.0.0.1:<relay port>`); WireGuard sessions survive it, so there is no new handshake. It works the same for the `wireguard` and `amneziawg` backends.
+* **Sticky failover.** Neither path is preferred. After the active path has been dead for `fallback_after`, the tunnel switches to the other one (the direct path is also still hunted for new ports while it is the active one). If the TLS link drops while it is active, the tunnel goes back to direct after 3 seconds. Each peer decides on its own, and receiving works on both paths on both peers at all times, so one side's switch moves the other side's endpoint by WireGuard roaming.
+* **Authentication.** TLS 1.3 with an ephemeral self-signed certificate; the peers then prove knowledge of `tls.secret` with an HMAC bound to the TLS session, so the secret never appears on the wire or in the certificate and a proof cannot be replayed. Unauthenticated connections are closed within 5 seconds. `sni` and `alpn` only make the handshake resemble ordinary HTTPS; they do not imitate a browser's TLS fingerprint.
+* **Not wire-compatible** with `reverse-udp-over-tls`: this uses length-prefixed frames and has both peers dial.
+
+**Notes**
+
+* Both peers must run Auto-WG with `tls.enabled` and the same `secret`. Passive tunnels (`hunting: false`, e.g. a MikroTik peer) cannot use it.
+* WireGuard carrying TCP flows over a TCP connection suffers from head-of-line blocking and retransmission interplay: treat TLS as a fallback, not a performance path. Packets are dropped, not queued without limit, when the link cannot keep up.
+* **Pick a TCP range that nothing else uses.** With `iptables: true` every incoming TCP connection to a port in `tls.port_range` is redirected to the TLS listener (the same trick as the UDP range), so a service listening on one of those ports becomes unreachable from outside. The range defaults to the UDP `port_range`, which is wide (`20000-30000`) unless you set it: set a narrow `tls.port_range` when other services run on this host.
+* The secret is masked in the web UI after saving; read it from the config file when setting up the other peer. The Generate button creates a random one.
+* The dashboard shows the active path, the TLS link (dialed or accepted, remote address, traffic) and path switches in the history. The Force hunt and Quick Rebind buttons reconnect the TLS link while it is the active path.
 
 ---
 

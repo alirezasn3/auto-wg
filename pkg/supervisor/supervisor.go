@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -373,6 +372,19 @@ func (s *Supervisor) GetRawConfigFile() (string, error) {
 // SaveAndApplyConfig validates the YAML, atomically writes it to the startup file on disk,
 // and dynamically applies the changes live in-memory to running tunnels and routing.
 func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) {
+	var syntax config.Config
+	if err := yaml.Unmarshal([]byte(yamlStr), &syntax); err != nil {
+		return nil, fmt.Errorf("invalid YAML syntax: %w", err)
+	}
+
+	// The web UI hands secrets back masked: put the stored ones in before validating and before the
+	// text is written to disk.
+	current := s.GetConfig()
+	yamlStr, err := config.RestoreMaskedSecrets(yamlStr, &current)
+	if err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
 	var newCfg config.Config
 	if err := yaml.Unmarshal([]byte(yamlStr), &newCfg); err != nil {
 		return nil, fmt.Errorf("invalid YAML syntax: %w", err)
@@ -386,11 +398,8 @@ func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if newCfg.Web.Password == "********" || newCfg.Web.Password == "" {
+	if newCfg.Web.Password == "" {
 		newCfg.Web.Password = s.cfg.Web.Password
-	}
-	if strings.Contains(yamlStr, `"********"`) && s.cfg.Web.Password != "" {
-		yamlStr = strings.ReplaceAll(yamlStr, `"********"`, fmt.Sprintf("%q", s.cfg.Web.Password))
 	}
 
 	// 1. Write atomically to startup config file
@@ -449,6 +458,7 @@ func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) 
 			_ = h.SaveHistory()
 			if s.iptMgr != nil {
 				_ = s.iptMgr.RemoveRule(iface)
+				_ = s.iptMgr.RemoveRule(iface + "-tls")
 			}
 			delete(s.hunters, iface)
 		}
