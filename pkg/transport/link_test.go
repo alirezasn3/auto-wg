@@ -33,8 +33,44 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 // iptables REDIRECT mapping a whole range onto the listener, so the ranges are narrow: a dial only lands
 // when the random remote port happens to be the listener's.
 func portBlock(widthA, widthB int) (a, b string) {
-	base := 20000 + rand.IntN(30000)
-	return fmt.Sprintf("%d-%d", base, base+widthA-1), fmt.Sprintf("%d-%d", base+100, base+100+widthB-1)
+	for {
+		base := 20000 + rand.IntN(30000)
+		if portsFree(base, widthA) && portsFree(base+100, widthB) && claimBlock(base) {
+			return fmt.Sprintf("%d-%d", base, base+widthA-1), fmt.Sprintf("%d-%d", base+100, base+100+widthB-1)
+		}
+	}
+}
+
+// portsFree reports whether n TCP ports from start can be bound right now: another test's connection, a
+// TIME_WAIT leftover or a service on the machine may hold one.
+func portsFree(start, n int) bool {
+	for p := start; p < start+n; p++ {
+		ln, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(p)))
+		if err != nil {
+			return false
+		}
+		_ = ln.Close()
+	}
+	return true
+}
+
+var (
+	blocksMu   sync.Mutex
+	blocksUsed = map[int]bool{}
+)
+
+// claimBlock makes sure no two tests of this run share a block, since a closed test can leave connections
+// on its ports for a while.
+func claimBlock(base int) bool {
+	blocksMu.Lock()
+	defer blocksMu.Unlock()
+	for b := range blocksUsed {
+		if b-base < 110 && base-b < 110 {
+			return false
+		}
+	}
+	blocksUsed[base] = true
+	return true
 }
 
 func testCfg(local, remote, secret string) Options {
