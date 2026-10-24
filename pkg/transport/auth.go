@@ -1,4 +1,4 @@
-package tlstun
+package transport
 
 import (
 	"crypto/ecdsa"
@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"strings"
 	"time"
@@ -20,7 +21,7 @@ import (
 const exporterLabel = "auto-wg tls tunnel"
 
 // ErrAuth means the peer failed the shared-secret proof (wrong secret, or not an Auto-WG peer).
-var ErrAuth = errors.New("tlstun: peer authentication failed")
+var ErrAuth = errors.New("transport: peer authentication failed")
 
 type role byte
 
@@ -29,32 +30,60 @@ const (
 	roleAcceptor role = 'A'
 )
 
-// proof is HMAC-SHA256(secret, exporter keying material || role). The exporter value is unique to this
-// TLS session, so a proof cannot be replayed on another connection, and the secret never crosses the
-// wire. The role byte stops a peer from reflecting the other side's proof back at it.
-func proof(secret string, cs tls.ConnectionState, r role) ([]byte, error) {
+// proof is HMAC-SHA256(secret, binding || role). The binding is unique to the connection (the TLS exporter
+// value, or a nonce the acceptor picked), so a proof cannot be replayed on another connection, and the
+// secret never crosses the wire. The role byte stops a peer from reflecting the other side's proof back.
+func proof(secret string, binding []byte, r role) []byte {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(binding)
+	mac.Write([]byte{byte(r)})
+	return mac.Sum(nil)
+}
+
+// tlsBinding is the channel binding of a TLS session.
+func tlsBinding(c *tls.Conn) ([]byte, error) {
+	cs := c.ConnectionState()
 	km, err := cs.ExportKeyingMaterial(exporterLabel, nil, 32)
 	if err != nil {
 		return nil, fmt.Errorf("export keying material: %w", err)
 	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(km)
-	mac.Write([]byte{byte(r)})
-	return mac.Sum(nil), nil
+	return km, nil
+}
+
+// nonceSize is the length of the acceptor's challenge when the transport offers no channel binding (SSH).
+const nonceSize = 32
+
+// authenticateNonce is authenticate for a transport without a channel binding: the acceptor opens with a
+// random challenge that the proofs are bound to. The connection is already encrypted and the dialer has
+// verified the server's host key, so the challenge only has to be fresh.
+func authenticateNonce(c io.ReadWriter, secret string, dialer bool) error {
+	buf := make([]byte, maxFrame)
+	if dialer {
+		nonce, ctrl, err := readFrame(c, buf)
+		if err != nil {
+			return err
+		}
+		if ctrl || len(nonce) != nonceSize {
+			return ErrAuth
+		}
+		nonce = append([]byte(nil), nonce...)
+		return authenticate(c, secret, nonce, true)
+	}
+	nonce := make([]byte, nonceSize)
+	fillRandom(nonce)
+	if err := writeFrame(c, nonce, padOff); err != nil {
+		return err
+	}
+	return authenticate(c, secret, nonce, false)
 }
 
 // authenticate runs the proof exchange on an established TLS connection. The dialer proves first; the
 // acceptor answers only after verifying, so an unauthenticated dialer learns nothing.
-func authenticate(c *tls.Conn, secret string, dialer bool) error {
-	cs := c.ConnectionState()
+func authenticate(c io.ReadWriter, secret string, binding []byte, dialer bool) error {
 	buf := make([]byte, maxFrame)
 
 	if dialer {
-		mine, err := proof(secret, cs, roleDialer)
-		if err != nil {
-			return err
-		}
-		if err := writeFrame(c, mine); err != nil {
+		if err := writeFrame(c, proof(secret, binding, roleDialer), padOff); err != nil {
 			return err
 		}
 		got, ctrl, err := readFrame(c, buf)
@@ -64,11 +93,7 @@ func authenticate(c *tls.Conn, secret string, dialer bool) error {
 		if ctrl {
 			return ErrAuth
 		}
-		want, err := proof(secret, cs, roleAcceptor)
-		if err != nil {
-			return err
-		}
-		if !hmac.Equal(got, want) {
+		if !hmac.Equal(got, proof(secret, binding, roleAcceptor)) {
 			return ErrAuth
 		}
 		return nil
@@ -81,18 +106,10 @@ func authenticate(c *tls.Conn, secret string, dialer bool) error {
 	if ctrl {
 		return ErrAuth
 	}
-	want, err := proof(secret, cs, roleDialer)
-	if err != nil {
-		return err
-	}
-	if !hmac.Equal(got, want) {
+	if !hmac.Equal(got, proof(secret, binding, roleDialer)) {
 		return ErrAuth
 	}
-	mine, err := proof(secret, cs, roleAcceptor)
-	if err != nil {
-		return err
-	}
-	return writeFrame(c, mine)
+	return writeFrame(c, proof(secret, binding, roleAcceptor), padOff)
 }
 
 // newCert makes an ephemeral self-signed certificate. When name is set it is used as the common name

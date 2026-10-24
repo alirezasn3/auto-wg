@@ -91,7 +91,7 @@ func (m *Manager) ApplyRedirect(key, proto, portRangeSpec string, targetPort int
 		return fmt.Errorf("format port range: %w", err)
 	}
 
-	comment := fmt.Sprintf("autowg-%s", iface)
+	comment := CommentPrefix + iface
 	ruleSpec := []string{
 		"-p", proto,
 		"--dport", dport,
@@ -188,6 +188,74 @@ func (m *Manager) RemoveAllRules() error {
 	}
 	m.activeRules = make(map[string][]string)
 	return nil
+}
+
+// CommentPrefix tags every rule this package installs, so leftovers can be recognised.
+const CommentPrefix = "autowg-"
+
+// staleRuleSpec turns a listed rule (`-A PREROUTING ... --comment autowg-wg0 ...`) into arguments for a
+// delete, if it carries an autowg- comment. The comment token is unquoted, because the arguments are passed to
+// iptables directly and not through a shell.
+func staleRuleSpec(line string) (spec []string, key string, ok bool) {
+	f := strings.Fields(line)
+	if len(f) < 3 || f[0] != "-A" || f[1] != "PREROUTING" {
+		return nil, "", false
+	}
+	spec = append([]string(nil), f[2:]...)
+	for i := 0; i+1 < len(spec); i++ {
+		if spec[i] != "--comment" {
+			continue
+		}
+		val := strings.Trim(spec[i+1], `"'`)
+		if !strings.HasPrefix(val, CommentPrefix) {
+			return nil, "", false
+		}
+		spec[i+1] = val
+		return spec, strings.TrimPrefix(val, CommentPrefix), true
+	}
+	return nil, "", false
+}
+
+// RemoveStaleRules deletes NAT PREROUTING rules tagged autowg-* that this process does not manage: the ones a
+// previous run left behind after a crash or kill -9, and the ones of tunnels that are no longer configured. They
+// would otherwise stay in front of the fresh rules and keep redirecting to a port nothing listens on. Call it
+// before applying rules. It returns how many rules it removed.
+func (m *Manager) RemoveStaleRules() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.isLinux {
+		return 0
+	}
+	removed := 0
+	for _, fam := range []struct {
+		name string
+		ipt  *goiptables.IPTables
+	}{{"IPv4", m.ipt4}, {"IPv6", m.ipt6}} {
+		if fam.ipt == nil {
+			continue
+		}
+		lines, err := fam.ipt.List("nat", "PREROUTING")
+		if err != nil {
+			continue
+		}
+		for _, line := range lines {
+			spec, key, ok := staleRuleSpec(line)
+			if !ok {
+				continue
+			}
+			if _, managed := m.activeRules[key]; managed {
+				continue
+			}
+			if err := fam.ipt.Delete("nat", "PREROUTING", spec...); err != nil {
+				m.log.Warn("IPTABLES", "Could not remove stale %s rule %q: %v", fam.name, line, err)
+				continue
+			}
+			removed++
+			m.log.Info("IPTABLES", "Removed stale %s NAT rule left by a previous run: %s", fam.name, strings.TrimPrefix(line, "-A PREROUTING "))
+		}
+	}
+	return removed
 }
 
 func sliceEqual(a, b []string) bool {

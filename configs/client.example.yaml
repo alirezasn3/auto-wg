@@ -55,19 +55,25 @@ tunnels:
       failure_threshold: 3
     history_file: "history-wgBridge0.json"
     iptables: true
-    # UDP-over-TLS fallback: a second path for when direct WireGuard is blocked. Needs Auto-WG with
-    # the same secret on the other peer too. TCP ranges default to the UDP ranges above.
-    tls:
-      enabled: false
-      secret: "change-me-to-a-long-random-string"
-      # port_range: "443-8443"
-      # remote_port_range: "443-8443"
-      fallback_after: 15s
-      # health_interval: 3s    # ping/pong probes on the TLS link
-      # health_timeout: 2s
-      # health_failures: 3     # unanswered probes before the connection is rebuilt
-      # sni: "www.example.com"
-      # alpn: ["h2", "http/1.1"]
+    # Transport: "direct" (default, UDP with port hunting), "tls" or "ssh". With tls or ssh the ranges
+    # above are TCP ranges and this tunnel does not hunt UDP ports; create one interface per transport
+    # and switch between them yourself. See the README section "WireGuard over TLS or SSH".
+    # transport: tls
+    # tls:
+    #   secret: "change-me-to-a-long-random-string"   # identical on both peers
+    #   padding: bucket       # off | bucket | random
+    #   reconnect_after: 10s  # rebuild the connection when WireGuard stays dead this long
+    #   sni: "www.example.com"
+    #   alpn: ["h2", "http/1.1"]
+    #
+    # transport: ssh
+    # ssh:
+    #   secret: "change-me-to-a-long-random-string"
+    #   user: autowg
+    #   identity_file: /etc/auto-wg/id_ed25519   # setting it makes this peer dial
+    #   host_key: "ssh-ed25519 AAAA..."          # the peer's /etc/ssh/ssh_host_ed25519_key.pub
+    #   sshd_port: 22
+    #   link_port: 40022
 
   - interface: "wgBridge1"
     name: "Upstream-Backup"

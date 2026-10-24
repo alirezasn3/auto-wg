@@ -105,7 +105,11 @@ func main() {
 	}
 
 	// Start Supervisor in background (manages hunters, PostUp/PreDown, and routing failover)
-	go sup.Start(ctx)
+	supDone := make(chan struct{})
+	go func() {
+		defer close(supDone)
+		sup.Start(ctx)
+	}()
 
 	// Handle graceful shutdown on OS signals
 	sigChan := make(chan os.Signal, 1)
@@ -120,6 +124,14 @@ func main() {
 		shutdownCtx, sCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer sCancel()
 		_ = webServer.Stop(shutdownCtx)
+	}
+
+	// The supervisor tears everything down once its context is cancelled (pre_down commands, history,
+	// iptables rules, TLS links). Wait for that: exiting right away would leave the rules behind.
+	select {
+	case <-supDone:
+	case <-time.After(45 * time.Second):
+		log.Warn("MAIN", "Shutdown cleanup did not finish within 45s; exiting anyway")
 	}
 
 	fmt.Println("Auto-WG stopped cleanly.")

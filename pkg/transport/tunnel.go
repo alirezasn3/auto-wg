@@ -1,15 +1,14 @@
-package tlstun
+package transport
 
 import (
 	"context"
 	"net/netip"
 	"time"
 
-	"auto-wg/pkg/config"
 	"auto-wg/pkg/logger"
 )
 
-// Deps are the pieces of the surrounding tunnel the TLS path needs.
+// Deps are the pieces of the surrounding tunnel the transport needs.
 type Deps struct {
 	Log         *logger.Logger
 	Iface       string
@@ -18,8 +17,9 @@ type Deps struct {
 	Redirect    func(portRange string, port int) error // installs the TCP REDIRECT of the local range; may be nil
 }
 
-// Status is a snapshot of the TLS path for the dashboard.
+// Status is a snapshot of the transport link for the dashboard.
 type Status struct {
+	Transport    string    `json:"transport"`           // "tls" or "ssh"
 	Connected    bool      `json:"connected"`           // a verified connection is up
 	Verifying    bool      `json:"verifying,omitempty"` // a connection exists but has not passed the probes yet
 	RTTMs        float64   `json:"rtt_ms"`              // last health probe round trip
@@ -42,19 +42,19 @@ type Status struct {
 	LastError    string    `json:"last_error,omitempty"`
 }
 
-// Tunnel is the TLS path of one WireGuard tunnel: a Link (listener, dialer, connection) and the loopback
-// relay WireGuard is pointed at while the path is active.
+// Tunnel is the transport of one WireGuard interface: a Link (listener, dialer, connection) and the loopback
+// relay WireGuard's peer endpoint points at.
 type Tunnel struct {
-	cfg  config.TLSConfig
+	opts Options
 	deps Deps
 
 	link  *Link
 	relay *relay
 }
 
-func New(cfg config.TLSConfig, deps Deps) *Tunnel {
-	t := &Tunnel{cfg: cfg, deps: deps}
-	t.link = newLink(cfg, deps.Iface, deps.Log, func(p []byte) {
+func New(opts Options, deps Deps) *Tunnel {
+	t := &Tunnel{opts: opts, deps: deps}
+	t.link = newLink(opts, deps.Iface, deps.Log, func(p []byte) {
 		if t.relay != nil {
 			t.relay.deliver(p)
 		}
@@ -62,13 +62,13 @@ func New(cfg config.TLSConfig, deps Deps) *Tunnel {
 	return t
 }
 
-// Start binds the relay socket and the TLS listener and starts dialing.
+// Start binds the relay socket and the carrier's listener and starts dialing.
 func (t *Tunnel) Start(ctx context.Context) error {
 	wgPort := t.deps.WGPort
 	if wgPort == nil {
 		wgPort = func() int { return 0 }
 	}
-	r, err := newRelay(t.cfg.RelayPort, t.deps.AvoidRanges, wgPort, t.link.Send)
+	r, err := newRelay(t.opts.Link.RelayPort, t.deps.AvoidRanges, wgPort, t.link.Send)
 	if err != nil {
 		return err
 	}
@@ -79,7 +79,7 @@ func (t *Tunnel) Start(ctx context.Context) error {
 		return err
 	}
 	go r.run()
-	t.deps.Log.Info("TLS", "[%s] TLS path ready: relay 127.0.0.1:%d, dialing TCP range %s", t.deps.Iface, r.port, t.cfg.RemotePortRange)
+	t.deps.Log.Info(t.link.tag, "[%s] %s transport ready: relay 127.0.0.1:%d, dialing TCP range %s", t.deps.Iface, t.link.car.name(), r.port, t.opts.RemotePortRange)
 	return nil
 }
 
@@ -98,7 +98,7 @@ func (t *Tunnel) SetTargets(r []string)  { t.link.SetTargets(r) }
 func (t *Tunnel) Reconnect()             { t.link.Reconnect() }
 func (t *Tunnel) ResetConn() bool        { return t.link.ResetConn() }
 
-// RelayAddr is the loopback endpoint WireGuard must use while the TLS path is active.
+// RelayAddr is the loopback endpoint WireGuard's peer must use.
 func (t *Tunnel) RelayAddr() netip.AddrPort {
 	if t.relay == nil {
 		return netip.AddrPort{}
@@ -108,6 +108,7 @@ func (t *Tunnel) RelayAddr() netip.AddrPort {
 
 func (t *Tunnel) Status() Status {
 	s := Status{
+		Transport:    t.opts.Kind,
 		BytesRx:      t.link.st.rxBytes.Load(),
 		BytesTx:      t.link.st.txBytes.Load(),
 		PacketsRx:    t.link.st.rxPkts.Load(),
@@ -124,9 +125,9 @@ func (t *Tunnel) Status() Status {
 		s.RelayPort = t.relay.port
 	}
 	t.link.mu.Lock()
-	s.ListenPort = t.link.listenPort
 	s.LastError = t.link.lastErr
 	t.link.mu.Unlock()
+	s.ListenPort = t.link.car.listenPort()
 	if c := t.link.active.Load(); c != nil {
 		s.Direction, s.Remote, s.Since = c.direction(), c.remote, c.since
 		s.RTTMs = float64(c.rtt.Load()) / float64(time.Millisecond)

@@ -1,4 +1,4 @@
-package tlstun
+package transport
 
 import (
 	"crypto/hmac"
@@ -60,13 +60,13 @@ func runAuth(t *testing.T, dialerSecret, acceptorSecret string) (dErr, aErr erro
 	d, a := handshakePair(t)
 	done := make(chan error, 1)
 	go func() {
-		err := authenticate(a, acceptorSecret, false)
+		err := authTLS(a, acceptorSecret, false)
 		if err != nil {
 			a.Close() // like the link: an unauthenticated peer just gets closed
 		}
 		done <- err
 	}()
-	dErr = authenticate(d, dialerSecret, true)
+	dErr = authTLS(d, dialerSecret, true)
 	return dErr, <-done
 }
 
@@ -92,22 +92,21 @@ func TestProofIsBoundToSessionAndRole(t *testing.T) {
 	d1, _ := handshakePair(t)
 	d2, _ := handshakePair(t)
 
-	p1, err := proof(secret, d1.ConnectionState(), roleDialer)
+	b1, err := tlsBinding(d1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p2, err := proof(secret, d2.ConnectionState(), roleDialer)
+	b2, err := tlsBinding(d2)
 	if err != nil {
 		t.Fatal(err)
 	}
+	p1 := proof(secret, b1, roleDialer)
+	p2 := proof(secret, b2, roleDialer)
 	if hmac.Equal(p1, p2) {
 		t.Fatal("a proof from one session must not verify on another (replay)")
 	}
 
-	pa, err := proof(secret, d1.ConnectionState(), roleAcceptor)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pa := proof(secret, b1, roleAcceptor)
 	if hmac.Equal(p1, pa) {
 		t.Fatal("dialer and acceptor proofs must differ so one cannot be reflected as the other")
 	}
@@ -149,5 +148,40 @@ func TestCertCamouflage(t *testing.T) {
 	cl.Close()
 	if g := <-got; g != "www.example.com|h2" {
 		t.Fatalf("server saw %q, want SNI www.example.com and ALPN h2", g)
+	}
+}
+
+func runNonceAuth(t *testing.T, dialerSecret, acceptorSecret string) (dErr, aErr error) {
+	t.Helper()
+	d, a := net.Pipe()
+	defer d.Close()
+	defer a.Close()
+	_ = d.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = a.SetDeadline(time.Now().Add(5 * time.Second))
+	done := make(chan error, 1)
+	go func() {
+		err := authenticateNonce(a, acceptorSecret, false)
+		if err != nil {
+			a.Close()
+		}
+		done <- err
+	}()
+	dErr = authenticateNonce(d, dialerSecret, true)
+	return dErr, <-done
+}
+
+func TestNonceAuthSameSecret(t *testing.T) {
+	if dErr, aErr := runNonceAuth(t, "a-long-shared-secret", "a-long-shared-secret"); dErr != nil || aErr != nil {
+		t.Fatalf("same secret must authenticate: dialer=%v acceptor=%v", dErr, aErr)
+	}
+}
+
+func TestNonceAuthWrongSecret(t *testing.T) {
+	dErr, aErr := runNonceAuth(t, "a-long-shared-secret", "another-secret-value")
+	if !errors.Is(aErr, ErrAuth) {
+		t.Fatalf("acceptor must answer a wrong proof with ErrAuth, got %v", aErr)
+	}
+	if dErr == nil {
+		t.Fatal("dialer must not authenticate against an acceptor that rejected it")
 	}
 }

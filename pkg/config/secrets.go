@@ -20,6 +20,9 @@ func MaskSecrets(cfg Config) Config {
 		if tunnels[i].TLS.Secret != "" {
 			tunnels[i].TLS.Secret = MaskedSecret
 		}
+		if tunnels[i].SSH.Secret != "" {
+			tunnels[i].SSH.Secret = MaskedSecret
+		}
 	}
 	cfg.Tunnels = tunnels
 	return cfg
@@ -33,30 +36,41 @@ func RestoreMaskedSecretsConfig(newCfg, old *Config) error {
 	}
 	for i := range newCfg.Tunnels {
 		t := &newCfg.Tunnels[i]
-		if t.TLS.Secret != MaskedSecret {
-			continue
+		for _, f := range []struct {
+			block  string
+			secret *string
+		}{{"tls", &t.TLS.Secret}, {"ssh", &t.SSH.Secret}} {
+			if *f.secret != MaskedSecret {
+				continue
+			}
+			stored, ok := storedLinkSecret(old, t.Interface, f.block)
+			if !ok {
+				return fmt.Errorf("tunnel %q: %s.secret is masked but no secret is stored for this interface; enter it again", t.Interface, f.block)
+			}
+			*f.secret = stored
 		}
-		stored, ok := storedTLSSecret(old, t.Interface)
-		if !ok {
-			return fmt.Errorf("tunnel %q: tls.secret is masked but no secret is stored for this interface; enter it again", t.Interface)
-		}
-		t.TLS.Secret = stored
 	}
 	return nil
 }
 
-func storedTLSSecret(cfg *Config, iface string) (string, bool) {
+func storedLinkSecret(cfg *Config, iface, block string) (string, bool) {
 	for _, t := range cfg.Tunnels {
-		if t.Interface == iface && t.TLS.Secret != "" {
-			return t.TLS.Secret, true
+		if t.Interface != iface {
+			continue
 		}
+		secret := t.TLS.Secret
+		if block == "ssh" {
+			secret = t.SSH.Secret
+		}
+		return secret, secret != ""
 	}
 	return "", false
 }
 
 // secretRef is one secret scalar found in a YAML document.
 type secretRef struct {
-	iface string // tunnel interface for a tls.secret, empty for the web password
+	iface string // tunnel interface for a tls/ssh secret, empty for the web password
+	block string // "tls" or "ssh"
 	web   bool
 	node  *yaml.Node
 }
@@ -88,15 +102,17 @@ func findSecrets(yamlStr string) ([]secretRef, error) {
 	}
 	if tunnels := mapValue(root, "tunnels"); tunnels != nil && tunnels.Kind == yaml.SequenceNode {
 		for _, t := range tunnels.Content {
-			sec := mapValue(mapValue(t, "tls"), "secret")
-			if sec == nil || sec.Kind != yaml.ScalarNode {
-				continue
-			}
 			iface := ""
 			if n := mapValue(t, "interface"); n != nil {
 				iface = n.Value
 			}
-			refs = append(refs, secretRef{iface: iface, node: sec})
+			for _, block := range []string{"tls", "ssh"} {
+				sec := mapValue(mapValue(t, block), "secret")
+				if sec == nil || sec.Kind != yaml.ScalarNode {
+					continue
+				}
+				refs = append(refs, secretRef{iface: iface, block: block, node: sec})
+			}
 		}
 	}
 	return refs, nil
@@ -216,9 +232,9 @@ func RestoreMaskedSecrets(yamlStr string, old *Config) (string, error) {
 		if ref.web {
 			return old.Web.Password, true, nil
 		}
-		stored, ok := storedTLSSecret(old, ref.iface)
+		stored, ok := storedLinkSecret(old, ref.iface, ref.block)
 		if !ok {
-			return "", false, fmt.Errorf("tunnel %q: tls.secret is masked but no secret is stored for this interface; enter it again", ref.iface)
+			return "", false, fmt.Errorf("tunnel %q: %s.secret is masked but no secret is stored for this interface; enter it again", ref.iface, ref.block)
 		}
 		return stored, true, nil
 	})

@@ -112,6 +112,13 @@ func (s *Supervisor) Start(ctx context.Context) {
 	s.log.Info("SUPERVISOR", " Starting Auto-WG Supervisor (Mode: %s, %d managed tunnels)", s.cfg.Mode, len(s.hunters))
 	s.log.Info("SUPERVISOR", "=================================================================")
 
+	// 0. Remove NAT rules a previous run left behind (crash, kill -9, tunnels dropped from the config)
+	if s.iptMgr != nil {
+		if n := s.iptMgr.RemoveStaleRules(); n > 0 {
+			s.log.Info("SUPERVISOR", "Removed %d stale autowg NAT rule(s) left by a previous run", n)
+		}
+	}
+
 	// 1. Run Global PostUp shell commands
 	if len(s.cfg.PostUp) > 0 {
 		s.log.Info("SUPERVISOR", "Executing global PostUp commands (%d commands)...", len(s.cfg.PostUp))
@@ -459,6 +466,7 @@ func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) 
 			if s.iptMgr != nil {
 				_ = s.iptMgr.RemoveRule(iface)
 				_ = s.iptMgr.RemoveRule(iface + "-tls")
+				_ = s.iptMgr.RemoveRule(iface + "-ssh")
 			}
 			delete(s.hunters, iface)
 		}

@@ -1,10 +1,8 @@
-package tlstun
+package transport
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
-	"fmt"
 	"math/rand/v2"
 	"net"
 	"strconv"
@@ -42,9 +40,9 @@ const (
 // reacts to those record sizes, fails this right away instead of after the first real handshake.
 var verifyProbeSizes = []int{148, 92, 32, 1200}
 
-// conn is one authenticated TLS connection.
+// conn is one authenticated connection of a carrier (TLS, or an OpenSSH session).
 type conn struct {
-	tc     *tls.Conn
+	tc     net.Conn
 	dialed bool // we dialed it (as opposed to accepting it)
 	remote string
 	since  time.Time
@@ -59,7 +57,7 @@ type conn struct {
 	failures atomic.Int32 // consecutive unanswered probes
 }
 
-func newConn(tc *tls.Conn, dialed bool) *conn {
+func newConn(tc net.Conn, dialed bool) *conn {
 	return &conn{
 		tc:     tc,
 		dialed: dialed,
@@ -103,16 +101,52 @@ type linkStats struct {
 	probes, probeFails, verifyFails, resets                     atomic.Uint64
 }
 
-// Link owns the TCP listener and the dial loop and keeps at most one live connection.
+// Options select and configure a carrier. Kind is "tls" or "ssh"; the ranges are the tunnel's TCP ranges.
+type Options struct {
+	Kind            string
+	PortRange       string // local TCP range, redirected to the carrier's listener
+	RemotePortRange string // the peer's TCP range to dial
+	Link            config.LinkConfig
+	TLS             config.TLSConfig
+	SSH             config.SSHConfig
+}
+
+// OptionsFor builds the options of a tunnel that runs over TLS or SSH.
+func OptionsFor(t config.TunnelConfig) Options {
+	o := Options{Kind: t.Transport, PortRange: t.PortRange, RemotePortRange: t.RemotePortRange, TLS: t.TLS, SSH: t.SSH}
+	if t.Transport == config.TransportSSH {
+		o.Link = t.SSH.LinkConfig
+	} else {
+		o.Link = t.TLS.LinkConfig
+	}
+	return o
+}
+
+// carrier is what differs between the transports: how connections are accepted and how they are dialed. Both
+// hand the link authenticated net.Conns that speak the frame protocol.
+type carrier interface {
+	name() string                                        // "TLS" or "SSH", used in logs and the dashboard
+	start(l *Link) error                                 // bind listeners and install the iptables redirect
+	stop()                                               // close the listeners
+	rotate(l *Link)                                      // move the listener to a new port, if the carrier has a movable one
+	listenPort() int                                     // the port to show on the dashboard (0 if none)
+	dial(l *Link, ip string, port int) (net.Conn, error) // one authenticated outgoing connection; errNoDial if this peer does not dial
+}
+
+// errNoDial means this peer is accept-only on this carrier.
+var errNoDial = errors.New("this peer does not dial")
+
+// Link keeps at most one live, verified connection to the peer: it accepts and dials through its carrier,
+// probes the connection's health and moves WireGuard's packets in and out.
 type Link struct {
-	cfg      config.TLSConfig
+	opts     Options
+	cfg      config.LinkConfig
+	car      carrier
+	tag      string // log component: "TLS" or "SSH"
 	iface    string
 	log      *logger.Logger
 	onPacket func([]byte) // called from the reader goroutine; the slice is only valid during the call
 	redirect func(portRange string, port int) error
-
-	srv *tls.Config
-	cli *tls.Config
 
 	active atomic.Pointer[conn]
 
@@ -123,9 +157,8 @@ type Link struct {
 	resolved     []string
 	resolvedAt   time.Time
 	targetIdx    int
-	ln           net.Listener
-	listenPort   int
 	lastAuthLog  time.Time
+	lastDialLog  time.Time
 	lastErr      string
 	downSince    time.Time
 
@@ -139,7 +172,8 @@ type Link struct {
 	st      linkStats
 }
 
-func newLink(cfg config.TLSConfig, iface string, log *logger.Logger, onPacket func([]byte), redirect func(string, int) error) *Link {
+func newLink(opts Options, iface string, log *logger.Logger, onPacket func([]byte), redirect func(string, int) error) *Link {
+	cfg := opts.Link
 	if cfg.HealthInterval <= 0 {
 		cfg.HealthInterval = defaultHealthInterval
 	}
@@ -149,7 +183,11 @@ func newLink(cfg config.TLSConfig, iface string, log *logger.Logger, onPacket fu
 	if cfg.HealthFailures <= 0 {
 		cfg.HealthFailures = defaultHealthFailures
 	}
-	return &Link{
+	if cfg.DialInterval <= 0 {
+		cfg.DialInterval = time.Second
+	}
+	l := &Link{
+		opts:     opts,
 		cfg:      cfg,
 		iface:    iface,
 		log:      log,
@@ -157,20 +195,19 @@ func newLink(cfg config.TLSConfig, iface string, log *logger.Logger, onPacket fu
 		redirect: redirect,
 		preauth:  make(chan struct{}, maxPreAuth),
 	}
+	if opts.Kind == config.TransportSSH {
+		l.car, l.tag = &sshCarrier{}, "SSH"
+	} else {
+		l.car, l.tag = &tlsCarrier{}, "TLS"
+	}
+	return l
 }
 
-// Start binds the listener and starts dialing.
+// Start binds the carrier's listeners and starts dialing.
 func (l *Link) Start(ctx context.Context) error {
-	cert, err := newCert(l.cfg.SNI)
-	if err != nil {
-		return fmt.Errorf("create certificate: %w", err)
-	}
-	l.srv = serverTLS(cert, l.cfg.ALPN)
-	l.cli = clientTLS(l.cfg.SNI, l.cfg.ALPN)
 	l.ctx, l.cancel = context.WithCancel(ctx)
 	l.downSince = time.Now()
-
-	if err := l.listen(); err != nil {
+	if err := l.car.start(l); err != nil {
 		l.cancel()
 		return err
 	}
@@ -185,116 +222,27 @@ func (l *Link) Stop() {
 		return
 	}
 	l.cancel()
-	l.mu.Lock()
-	ln := l.ln
-	l.mu.Unlock()
-	if ln != nil {
-		_ = ln.Close()
-	}
+	l.car.stop()
 	if c := l.active.Load(); c != nil {
 		c.close()
 	}
 	l.wg.Wait()
 }
 
-func (l *Link) listen() error {
-	var (
-		ln   net.Listener
-		port int
-		err  error
-	)
-	for i := 0; i < 30; i++ {
-		if port, err = config.PickRandomPort(l.cfg.PortRange); err != nil {
-			return err
-		}
-		ln, err = net.Listen("tcp", net.JoinHostPort("::", strconv.Itoa(port)))
-		if err != nil {
-			ln, err = net.Listen("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
-		}
-		if err == nil {
-			break
-		}
-	}
-	if err != nil {
-		return fmt.Errorf("listen on a TCP port from %s: %w", l.cfg.PortRange, err)
-	}
-
-	l.mu.Lock()
-	old := l.ln
-	l.ln, l.listenPort = ln, port
-	l.mu.Unlock()
-	if old != nil {
-		_ = old.Close()
-	}
-
-	if l.redirect != nil {
-		if err := l.redirect(l.cfg.PortRange, port); err != nil {
-			l.log.Warn("TLS", "[%s] Failed to redirect TCP range %s to :%d: %v", l.iface, l.cfg.PortRange, port, err)
-		}
-	}
-	l.log.Info("TLS", "[%s] Listening for TLS peers on TCP :%d (range %s)", l.iface, port, l.cfg.PortRange)
-
-	l.wg.Add(1)
-	go l.acceptLoop(ln)
-	return nil
-}
-
-func (l *Link) listener() net.Listener {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.ln
-}
-
-func (l *Link) acceptLoop(ln net.Listener) {
-	defer l.wg.Done()
-	for {
-		raw, err := ln.Accept()
-		if err != nil {
-			if l.ctx.Err() != nil || l.listener() != ln || errors.Is(err, net.ErrClosed) {
-				return
-			}
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		l.wg.Add(1)
-		go func() {
-			defer l.wg.Done()
-			l.handleIncoming(raw)
-		}()
-	}
-}
-
-func (l *Link) handleIncoming(raw net.Conn) {
+// gate admits a connection to the pre-authentication stage unless too many are already there, so a peer that
+// connects and says nothing cannot occupy the listener. The returned function releases the slot.
+func (l *Link) gate() (release func(), ok bool) {
 	select {
 	case l.preauth <- struct{}{}:
-		defer func() { <-l.preauth }()
+		return func() { <-l.preauth }, true
 	default:
-		_ = raw.Close()
-		return
+		return nil, false
 	}
-
-	// A shutdown must not wait for a peer that is still in its handshake.
-	defer context.AfterFunc(l.ctx, func() { _ = raw.Close() })()
-	setKeepAlive(raw)
-	_ = raw.SetDeadline(time.Now().Add(authTimeout))
-	tc := tls.Server(raw, l.srv)
-	if err := tc.Handshake(); err != nil {
-		_ = raw.Close()
-		l.log.Debug("TLS", "[%s] TLS handshake from %s failed: %v", l.iface, raw.RemoteAddr(), err)
-		return
-	}
-	if err := authenticate(tc, l.cfg.Secret, false); err != nil {
-		_ = raw.Close()
-		l.noteAuthFailure(raw.RemoteAddr().String(), err)
-		return
-	}
-	_ = raw.SetDeadline(time.Time{})
-	l.install(newConn(tc, false))
 }
 
 func (l *Link) noteAuthFailure(remote string, err error) {
 	if !errors.Is(err, ErrAuth) {
-		l.log.Debug("TLS", "[%s] Peer %s failed to authenticate: %v", l.iface, remote, err)
+		l.log.Debug(l.tag, "[%s] Peer %s failed to authenticate: %v", l.iface, remote, err)
 		return
 	}
 	l.st.authFails.Add(1)
@@ -303,10 +251,23 @@ func (l *Link) noteAuthFailure(remote string, err error) {
 	if !quiet {
 		l.lastAuthLog = time.Now()
 	}
-	l.lastErr = "peer authentication failed (is tls.secret identical on both peers?)"
+	l.lastErr = "peer authentication failed (is the secret identical on both peers?)"
 	l.mu.Unlock()
 	if !quiet {
-		l.log.Warn("TLS", "[%s] Peer %s failed authentication: is tls.secret identical on both peers?", l.iface, remote)
+		l.log.Warn(l.tag, "[%s] Peer %s failed authentication: is the secret identical on both peers?", l.iface, remote)
+	}
+}
+
+// warnDial logs a dial failure the operator has to act on, at most once per authLogEvery.
+func (l *Link) warnDial(err error) {
+	l.mu.Lock()
+	quiet := time.Since(l.lastDialLog) < authLogEvery
+	if !quiet {
+		l.lastDialLog = time.Now()
+	}
+	l.mu.Unlock()
+	if !quiet {
+		l.log.Warn(l.tag, "[%s] %v", l.iface, err)
 	}
 }
 
@@ -336,44 +297,40 @@ func (l *Link) dialOnce() {
 	if !ok {
 		return
 	}
-	port, err := config.PickRandomPort(l.cfg.RemotePortRange)
+	port, err := config.PickRandomPort(l.opts.RemotePortRange)
 	if err != nil {
 		l.setErr(err)
 		return
 	}
-	l.dialTo(net.JoinHostPort(ip, strconv.Itoa(port)))
+	l.dialTo(ip, port)
 }
 
-// dialTo makes one connection attempt to addr and installs the connection when it authenticates.
-func (l *Link) dialTo(addr string) {
+// dialTo makes one connection attempt and installs the connection when it authenticates.
+func (l *Link) dialTo(ip string, port int) {
+	c, err := l.car.dial(l, ip, port)
+	if errors.Is(err, errNoDial) {
+		return
+	}
 	l.st.dials.Add(1)
-
-	raw, err := l.dial(addr)
 	if err != nil {
-		l.setErr(err)
+		var le *loggedError
+		switch {
+		case errors.Is(err, ErrAuth):
+			l.noteAuthFailure(net.JoinHostPort(ip, strconv.Itoa(port)), err)
+		case errors.As(err, &le):
+			l.setErr(err)
+			l.warnDial(err)
+		default:
+			l.setErr(err)
+		}
 		return
 	}
-	defer context.AfterFunc(l.ctx, func() { _ = raw.Close() })()
-	setKeepAlive(raw)
-	_ = raw.SetDeadline(time.Now().Add(authTimeout))
-	tc := tls.Client(raw, l.cli)
-	if err := tc.Handshake(); err != nil {
-		_ = raw.Close()
-		l.setErr(err)
-		return
-	}
-	if err := authenticate(tc, l.cfg.Secret, true); err != nil {
-		_ = raw.Close()
-		l.noteAuthFailure(addr, err)
-		return
-	}
-	_ = raw.SetDeadline(time.Time{})
-	l.install(newConn(tc, true))
+	l.install(newConn(c, true))
 }
 
-// dial connects from a random source port of the local range (like the UDP path binds its listen port
+// dialTCP connects from a random source port of the local range (like the UDP side binds its listen port
 // inside the range), falling back to an ephemeral port when the chosen ones are taken.
-func (l *Link) dial(addr string) (net.Conn, error) {
+func (l *Link) dialTCP(addr string) (net.Conn, error) {
 	// SO_REUSEADDR lets a source port that still has TIME_WAIT sockets (every failed attempt leaves one)
 	// be bound again; the 4-tuple stays unique because the remote port is random too.
 	d := net.Dialer{Timeout: dialTimeout, Control: func(network, address string, c syscall.RawConn) error {
@@ -382,7 +339,7 @@ func (l *Link) dial(addr string) (net.Conn, error) {
 		})
 	}}
 	for i := 0; i < 5; i++ {
-		lp, err := config.PickRandomPort(l.cfg.PortRange)
+		lp, err := config.PickRandomPort(l.opts.PortRange)
 		if err != nil {
 			break
 		}
@@ -442,7 +399,7 @@ func (l *Link) install(c *conn) {
 	if cur != nil && !preferNew(cur, c, l.primary, l.primaryKnown) {
 		l.mu.Unlock()
 		c.close()
-		l.log.Debug("TLS", "[%s] Dropped duplicate TLS connection (%s %s)", l.iface, c.direction(), c.remote)
+		l.log.Debug(l.tag, "[%s] Dropped duplicate %s connection (%s %s)", l.iface, l.car.name(), c.direction(), c.remote)
 		return
 	}
 	l.active.Store(c)
@@ -450,9 +407,9 @@ func (l *Link) install(c *conn) {
 
 	if cur != nil {
 		cur.close()
-		l.log.Info("TLS", "[%s] Replaced duplicate TLS connection with the one dialed by the primary peer", l.iface)
+		l.log.Info(l.tag, "[%s] Replaced duplicate %s connection with the one dialed by the primary peer", l.iface, l.car.name())
 	}
-	l.log.Debug("TLS", "[%s] TLS connection established (%s %s), verifying", l.iface, c.direction(), c.remote)
+	l.log.Debug(l.tag, "[%s] %s connection established (%s %s), verifying", l.iface, l.car.name(), c.direction(), c.remote)
 	if f := l.onInstalled.Load(); f != nil {
 		(*f)(c)
 	}
@@ -472,7 +429,7 @@ func (l *Link) markVerified(c *conn) {
 		l.lastErr = ""
 	}
 	l.mu.Unlock()
-	l.log.Info("TLS", "[%s] TLS link up: %s %s (round trip %v)", l.iface, c.direction(), c.remote, fmtRTT(time.Duration(c.rtt.Load())))
+	l.log.Info(l.tag, "[%s] %s link up: %s %s (round trip %v)", l.iface, l.car.name(), c.direction(), c.remote, fmtRTT(time.Duration(c.rtt.Load())))
 }
 
 // fmtRTT keeps sub-millisecond round trips (loopback, LAN) readable instead of rounding them to 0s.
@@ -491,7 +448,7 @@ func (l *Link) dropped(c *conn) {
 			l.downSince = time.Now()
 		}
 		if c.verified.Load() {
-			l.log.Info("TLS", "[%s] TLS link down (%s %s)", l.iface, c.direction(), c.remote)
+			l.log.Info(l.tag, "[%s] %s link down (%s %s)", l.iface, l.car.name(), c.direction(), c.remote)
 		}
 	}
 }
@@ -577,9 +534,9 @@ func (l *Link) writer(c *conn) {
 		_ = c.tc.SetWriteDeadline(time.Now().Add(writeTimeout))
 		var err error
 		if ctrl {
-			err = writeControl(c.tc, p)
+			err = writeControl(c.tc, p, l.cfg.Padding)
 		} else {
-			err = writeFrame(c.tc, p)
+			err = writeFrame(c.tc, p, l.cfg.Padding)
 		}
 		if err != nil {
 			return
@@ -648,8 +605,8 @@ func (l *Link) prober(c *conn) {
 		default:
 		}
 		l.st.verifyFails.Add(1)
-		l.setErrText("new TLS connection did not pass the health probes")
-		l.log.Warn("TLS", "[%s] New TLS connection to %s failed verification (no probe echoed within %v); reconnecting", l.iface, c.remote, l.cfg.HealthTimeout)
+		l.setErrText("new connection did not pass the health probes")
+		l.log.Warn(l.tag, "[%s] New %s connection to %s failed verification (no probe echoed within %v); reconnecting", l.iface, l.car.name(), c.remote, l.cfg.HealthTimeout)
 		c.close()
 		return
 	}
@@ -682,10 +639,10 @@ func (l *Link) prober(c *conn) {
 		}
 		l.st.probeFails.Add(1)
 		n := int(c.failures.Add(1))
-		l.log.Debug("TLS", "[%s] Health probe unanswered (%d/%d)", l.iface, n, l.cfg.HealthFailures)
+		l.log.Debug(l.tag, "[%s] Health probe unanswered (%d/%d)", l.iface, n, l.cfg.HealthFailures)
 		if n >= l.cfg.HealthFailures {
-			l.setErrText("TLS link stopped answering health probes")
-			l.log.Warn("TLS", "[%s] TLS link to %s failed its health check (%d probes unanswered); reconnecting", l.iface, c.remote, n)
+			l.setErrText("link stopped answering health probes")
+			l.log.Warn(l.tag, "[%s] %s link to %s failed its health check (%d probes unanswered); reconnecting", l.iface, l.car.name(), c.remote, n)
 			c.close()
 			return
 		}
@@ -771,19 +728,18 @@ func (l *Link) ResetConn() bool {
 		return false
 	}
 	l.st.resets.Add(1)
-	l.log.Info("TLS", "[%s] Dropping the TLS connection to %s so a new one is built", l.iface, c.remote)
+	l.log.Info(l.tag, "[%s] Dropping the %s connection to %s so a new one is built", l.iface, l.car.name(), c.remote)
 	c.close()
 	return true
 }
 
-// Reconnect drops the live connection and moves the listener to a new port of the local range.
+// Reconnect drops the live connection and, for carriers that have a movable listener, moves it to a new port
+// of the local range.
 func (l *Link) Reconnect() {
 	if c := l.active.Load(); c != nil {
 		c.close()
 	}
 	if l.ctx != nil && l.ctx.Err() == nil {
-		if err := l.listen(); err != nil {
-			l.log.Warn("TLS", "[%s] Could not rotate the TLS listener: %v", l.iface, err)
-		}
+		l.car.rotate(l)
 	}
 }

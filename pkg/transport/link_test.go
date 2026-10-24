@@ -1,4 +1,4 @@
-package tlstun
+package transport
 
 import (
 	"context"
@@ -37,12 +37,14 @@ func portBlock(widthA, widthB int) (a, b string) {
 	return fmt.Sprintf("%d-%d", base, base+widthA-1), fmt.Sprintf("%d-%d", base+100, base+100+widthB-1)
 }
 
-func testCfg(local, remote, secret string) config.TLSConfig {
-	return config.TLSConfig{
-		Enabled: true, Secret: secret, PortRange: local, RemotePortRange: remote,
-		FallbackAfter: 15 * time.Second, DialInterval: 100 * time.Millisecond,
-		// Fast probes so stall detection takes a second or two in tests instead of tens of seconds.
-		HealthInterval: 150 * time.Millisecond, HealthTimeout: 400 * time.Millisecond, HealthFailures: 3,
+func testCfg(local, remote, secret string) Options {
+	return Options{
+		Kind: config.TransportTLS, PortRange: local, RemotePortRange: remote,
+		Link: config.LinkConfig{
+			Secret: secret, DialInterval: 100 * time.Millisecond, Padding: "off",
+			// Fast probes so stall detection takes a second or two in tests instead of tens of seconds.
+			HealthInterval: 150 * time.Millisecond, HealthTimeout: 400 * time.Millisecond, HealthFailures: 3,
+		},
 	}
 }
 
@@ -164,7 +166,7 @@ func TestOnlyOneSideCanDial(t *testing.T) {
 	// The dial must have used a source port from A's local range.
 	_, portStr, _ := net.SplitHostPort(b.active.Load().remote)
 	port, _ := strconv.Atoi(portStr)
-	start, end, _ := config.ParsePortRange(a.cfg.PortRange)
+	start, end, _ := config.ParsePortRange(a.opts.PortRange)
 	if port < start || port > end {
 		t.Fatalf("source port %d outside the local range %d-%d", port, start, end)
 	}
@@ -201,9 +203,9 @@ func TestReconnectRecovers(t *testing.T) {
 	waitFor(t, 2*time.Second, "link dropped", func() bool { return !a.Connected() || !b.Connected() })
 	waitFor(t, 6*time.Second, "link back up", func() bool { return a.Connected() && b.Connected() })
 
-	start, end, _ := config.ParsePortRange(a.cfg.PortRange)
+	start, end, _ := config.ParsePortRange(a.opts.PortRange)
 	a.mu.Lock()
-	port := a.listenPort
+	port := a.car.listenPort()
 	a.mu.Unlock()
 	if port < start || port > end {
 		t.Fatalf("rotated listener port %d outside %d-%d", port, start, end)
@@ -246,7 +248,7 @@ func TestPreAuthLimit(t *testing.T) {
 	defer l.Stop()
 
 	l.mu.Lock()
-	port := l.listenPort
+	port := l.car.listenPort()
 	l.mu.Unlock()
 
 	// Hold maxPreAuth silent connections; the next one must be closed straight away.
@@ -287,7 +289,7 @@ func TestSimultaneousDialsKeepThePrimaryDialedConnection(t *testing.T) {
 		// the test makes the two dials itself.
 		cfgA := testCfg(aRange, "9-9", "shared-secret-1234")
 		cfgB := testCfg(bRange, "9-9", "shared-secret-1234")
-		cfgA.DialInterval, cfgB.DialInterval = time.Hour, time.Hour
+		cfgA.Link.DialInterval, cfgB.Link.DialInterval = time.Hour, time.Hour
 		a := newLink(cfgA, "a", testLog(), nil, nil)
 		b := newLink(cfgB, "b", testLog(), nil, nil)
 		a.SetPrimary(true)
@@ -301,18 +303,13 @@ func TestSimultaneousDialsKeepThePrimaryDialedConnection(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond) // let the loops' first (failing) attempts finish
 
-		a.mu.Lock()
-		aAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(a.listenPort))
-		a.mu.Unlock()
-		b.mu.Lock()
-		bAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(b.listenPort))
-		b.mu.Unlock()
+		aPort, bPort := a.car.listenPort(), b.car.listenPort()
 
 		start := make(chan struct{})
 		var wg sync.WaitGroup
 		wg.Add(2)
-		go func() { defer wg.Done(); <-start; a.dialTo(bAddr) }()
-		go func() { defer wg.Done(); <-start; b.dialTo(aAddr) }()
+		go func() { defer wg.Done(); <-start; a.dialTo("127.0.0.1", bPort) }()
+		go func() { defer wg.Done(); <-start; b.dialTo("127.0.0.1", aPort) }()
 		close(start)
 		wg.Wait()
 
@@ -335,7 +332,7 @@ func TestStopDoesNotWaitForHalfOpenHandshakes(t *testing.T) {
 		t.Fatal(err)
 	}
 	l.mu.Lock()
-	port := l.listenPort
+	port := l.car.listenPort()
 	l.mu.Unlock()
 
 	// A peer that connects and then says nothing sits in the TLS handshake for up to authTimeout.
@@ -385,7 +382,7 @@ func TestDialKeepsUsingTheLocalRangeAfterTimeWait(t *testing.T) {
 	start, end, _ := config.ParsePortRange(local)
 
 	for i := 0; i < 24; i++ {
-		c, err := l.dial(addrs[i])
+		c, err := l.dialTCP(addrs[i])
 		if err != nil {
 			t.Fatalf("dial %d: %v", i, err)
 		}
@@ -395,5 +392,38 @@ func TestDialKeepsUsingTheLocalRangeAfterTimeWait(t *testing.T) {
 			t.Fatalf("dial %d used source port %d outside the local range %d-%d", i, port, start, end)
 		}
 		c.Close() // the closing side keeps the port in TIME_WAIT
+	}
+}
+
+// Padding changes only the bytes on the wire: probes, verification and packets still pass.
+func TestPaddedLinksCarryTraffic(t *testing.T) {
+	for _, mode := range []string{"bucket", "random"} {
+		aRange, bRange := portBlock(1, 1)
+		optsA, optsB := testCfg(aRange, bRange, "shared-secret-1234"), testCfg(bRange, aRange, "shared-secret-1234")
+		optsA.Link.Padding, optsB.Link.Padding = mode, mode
+		ra, rb := &recorder{}, &recorder{}
+		a := newLink(optsA, "a", testLog(), ra.add, nil)
+		b := newLink(optsB, "b", testLog(), rb.add, nil)
+		a.SetTargets([]string{"127.0.0.1"})
+		b.SetTargets([]string{"127.0.0.1"})
+		a.SetPrimary(true)
+		b.SetPrimary(false)
+		ctx, cancel := context.WithCancel(context.Background())
+		if err := a.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, 5*time.Second, mode+": links up", func() bool { return a.Connected() && b.Connected() })
+		big := string(make([]byte, 1300))
+		for i := 0; i < 20; i++ {
+			a.Send([]byte("from-a"))
+			b.Send([]byte(big))
+		}
+		waitFor(t, 3*time.Second, mode+": packets delivered", func() bool { return rb.has("from-a") && ra.has(big) })
+		a.Stop()
+		b.Stop()
+		cancel()
 	}
 }

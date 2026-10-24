@@ -89,7 +89,7 @@ class AutoWGApp {
     this.wgInterface = document.getElementById('wgInterface');
     this.localPort = document.getElementById('localPort');
     this.localPortRange = document.getElementById('localPortRange');
-    this.localPubKey = document.getElementById('localPubKey');
+    this.heroPanel = document.getElementById('heroPanel');
 
     this.lastHandshake = document.getElementById('lastHandshake');
     this.pingStatus = document.getElementById('pingStatus');
@@ -100,7 +100,6 @@ class AutoWGApp {
     this.targetIP = document.getElementById('targetIP');
     this.remotePort = document.getElementById('remotePort');
     this.remotePortRange = document.getElementById('remotePortRange');
-    this.peerPubKey = document.getElementById('peerPubKey');
 
     // Telemetry Grid Elements
     this.huntRecoverySummary = document.getElementById('huntRecoverySummary');
@@ -109,22 +108,21 @@ class AutoWGApp {
     this.disconnectedTimestamp = document.getElementById('disconnectedTimestamp');
     this.lastHuntReason = document.getElementById('lastHuntReason');
     this.lastHuntTime = document.getElementById('lastHuntTime');
+    this.lastHuntSep = document.getElementById('lastHuntSep');
+    this.timerLinkSince = document.getElementById('timerLinkSince');
+    this.linkSinceLabel = document.getElementById('linkSinceLabel');
+    this.lastPathSwitch = document.getElementById('lastPathSwitch');
+    this.linkSince = document.getElementById('linkSince');
+
 
     this.iptablesStateText = document.getElementById('iptablesStateText');
     this.iptablesSubtext = document.getElementById('iptablesSubtext');
-    this.iptablesRange = document.getElementById('iptablesRange');
-    this.rowPath = document.getElementById('rowPath');
-    this.pathState = document.getElementById('pathState');
-    this.rowTlsLink = document.getElementById('rowTlsLink');
-    this.tlsLinkState = document.getElementById('tlsLinkState');
+    this.rowTransport = document.getElementById('rowTransport');
+    this.transportState = document.getElementById('transportState');
+    this.rowLink = document.getElementById('rowLink');
+    this.linkState = document.getElementById('linkState');
     this.bridgeProtoBadge = document.getElementById('bridgeProtoBadge');
-    this.tunnelPingTarget = document.getElementById('tunnelPingTarget');
-    this.failedPingsCount = document.getElementById('failedPingsCount');
 
-    this.totalRx = document.getElementById('totalRx');
-    this.totalTx = document.getElementById('totalTx');
-    this.ifaceState = document.getElementById('ifaceState');
-    this.staggerRoleDetail = document.getElementById('staggerRoleDetail');
 
     // Logs & Terminal
     this.terminal = document.getElementById('terminal');
@@ -250,8 +248,6 @@ class AutoWGApp {
       });
     };
 
-    setupCopy('btnCopyLocalKey', () => this.getSelectedTunnelData()?.local_public_key || '', 'Local Key');
-    setupCopy('btnCopyPeerKey', () => this.getSelectedTunnelData()?.peer_public_key || '', 'Peer Key');
     setupCopy('btnCopyTargetIP', () => this.getSelectedTunnelData()?.target_ip || '', 'Target IP');
   }
 
@@ -368,6 +364,14 @@ class AutoWGApp {
     if (this.disconnectedTimestamp) {
       this.disconnectedTimestamp.textContent = formatTimestampAndAgo(data.last_disconnected_at);
     }
+
+    // Row that only exists on a TLS/SSH transport
+    const linked = data.transport === 'tls' || data.transport === 'ssh';
+    if (this.timerLinkSince) this.timerLinkSince.style.display = linked ? '' : 'none';
+    if (linked) {
+      if (this.linkSinceLabel) this.linkSinceLabel.textContent = `${data.transport.toUpperCase()} link up since`;
+      if (this.linkSince) this.linkSince.textContent = data.link_connected ? formatTimestampAndAgo(data.link_since) : 'Link down';
+    }
   }
 
   renderStatus(fullData) {
@@ -382,6 +386,7 @@ class AutoWGApp {
     const state = data.state || 'UNKNOWN';
     this.stateBadge.textContent = state;
     this.stateBadge.className = 'status-pill status-' + state.toLowerCase();
+    if (this.heroPanel) this.heroPanel.dataset.state = state.toLowerCase();
 
     if (state === 'CONNECTED') {
       this.statusReason.textContent = 'Tunnel healthy; packets flowing';
@@ -399,8 +404,6 @@ class AutoWGApp {
     this.wgInterface.textContent = (data.interface || 'wg0') + (data.backend === 'amneziawg' ? ' · AmneziaWG' : '');
     this.localPort.textContent = data.local_port > 0 ? `:${data.local_port}` : '--';
     this.localPortRange.textContent = data.local_port_range || '--';
-    this.localPubKey.textContent = data.local_public_key || '--';
-    this.localPubKey.title = data.local_public_key || '';
 
     // 3. Center Bridge
     this.updateLiveHandshakeAge();
@@ -450,13 +453,11 @@ class AutoWGApp {
     }
     this.remotePort.textContent = data.remote_port > 0 ? `:${data.remote_port}` : '--';
     this.remotePortRange.textContent = data.remote_port_range || '--';
-    this.peerPubKey.textContent = data.peer_public_key || '--';
-    this.peerPubKey.title = data.peer_public_key || '';
 
     // 5. Telemetry Cards
     if (data.hunting === false) {
       this.huntRecoverySummary.textContent = 'Passive';
-      this.huntAttemptStatus.textContent = state === 'CONNECTED' ? 'Passive (Connected)' : 'Passive (Monitoring)';
+      this.huntAttemptStatus.textContent = 'Passive (no port rotation)';
       this.huntAttemptStatus.style.color = state === 'CONNECTED' ? 'var(--success)' : 'var(--warning)';
     } else {
       this.huntRecoverySummary.textContent = `${data.successful_hunts || 0} / ${data.total_hunts || 0}`;
@@ -465,11 +466,11 @@ class AutoWGApp {
         this.huntAttemptStatus.textContent = `Hunting (Attempt #${data.current_attempt})`;
         this.huntAttemptStatus.style.color = 'var(--accent)';
       } else if (state === 'CONNECTED') {
-        this.huntAttemptStatus.textContent = 'Idle (Connected)';
+        this.huntAttemptStatus.textContent = 'Idle';
         this.huntAttemptStatus.style.color = 'var(--success)';
       } else {
-        this.huntAttemptStatus.textContent = state;
-        this.huntAttemptStatus.style.color = 'var(--text-main)';
+        this.huntAttemptStatus.textContent = '—';
+        this.huntAttemptStatus.style.color = 'var(--text-muted)';
       }
     }
 
@@ -482,8 +483,10 @@ class AutoWGApp {
       this.btnRebind.title = data.hunting === false ? 'Port rebind is disabled for this passive tunnel' : 'Rotate local listen port';
     }
 
-    this.lastHuntReason.textContent = data.last_hunt_reason || 'None';
-    this.lastHuntReason.title = data.last_hunt_reason || 'None';
+    const huntReason = data.last_hunt_reason || '';
+    this.lastHuntReason.textContent = huntReason;
+    this.lastHuntReason.title = huntReason;
+    if (this.lastHuntSep) this.lastHuntSep.style.display = huntReason ? '' : 'none';
 
     if (data.last_hunt_time && !data.last_hunt_time.startsWith('0001')) {
       const huntDate = new Date(data.last_hunt_time);
@@ -497,81 +500,62 @@ class AutoWGApp {
       this.lastHuntTime.textContent = 'Never';
     }
 
-    // iptables Card
+    // Network tile
     if (data.iptables_active) {
-      this.iptablesStateText.textContent = 'ACTIVE';
+      this.iptablesStateText.textContent = 'On';
       this.iptablesStateText.style.color = 'var(--success)';
-      this.iptablesSubtext.textContent = `REDIRECT -> :${data.local_port || '...'}`;
+      this.iptablesSubtext.textContent = `→ :${data.local_port || '...'}`;
     } else {
-      this.iptablesStateText.textContent = 'OFF';
+      this.iptablesStateText.textContent = 'Off';
       this.iptablesStateText.style.color = 'var(--text-muted)';
-      this.iptablesSubtext.textContent = 'Disabled / Non-Linux';
+      this.iptablesSubtext.textContent = '';
     }
-    this.iptablesRange.textContent = data.local_port_range || '--';
-    this.renderPath(data);
-    this.tunnelPingTarget.textContent = data.in_tunnel_ping_target || 'Auto-detecting...';
-    if (!data.ping_enabled) {
-      this.failedPingsCount.textContent = 'Disabled';
-      this.failedPingsCount.style.color = 'var(--text-muted)';
-    } else if (data.ping_verified) {
-      this.failedPingsCount.textContent = '0 (Verified OK)';
-      this.failedPingsCount.style.color = 'var(--success)';
-    } else {
-      this.failedPingsCount.textContent = `${data.failed_pings || 0} failed`;
-      this.failedPingsCount.style.color = (data.failed_pings > 0) ? 'var(--danger)' : 'var(--warning)';
-    }
-
-    // Traffic Card
-    this.totalRx.textContent = formatBytes(data.receive_bytes);
-    this.totalTx.textContent = formatBytes(data.transmit_bytes);
-    this.ifaceState.textContent = state === 'CONNECTED' ? 'ACTIVE (UP)' : 'MONITORING';
-    this.staggerRoleDetail.textContent = data.is_primary ? 'Primary (Cycle 0)' : 'Secondary (Cycle 1)';
+    this.renderTransport(data);
 
     // Connection Events History
     this.renderEvents(data.events);
   }
 
-  renderPath(data) {
-    const enabled = !!data.tls_enabled;
-    const onTls = enabled && data.path === 'tls';
-    if (this.rowPath) this.rowPath.style.display = enabled ? '' : 'none';
-    if (this.rowTlsLink) this.rowTlsLink.style.display = enabled ? '' : 'none';
+  renderTransport(data) {
+    const kind = data.transport || 'direct';
+    const linked = kind === 'tls' || kind === 'ssh';
+    const label = kind.toUpperCase();
+    if (this.rowTransport) this.rowTransport.style.display = linked ? '' : 'none';
+    if (this.rowLink) this.rowLink.style.display = linked ? '' : 'none';
     if (this.bridgeProtoBadge) {
-      this.bridgeProtoBadge.textContent = onTls ? 'TLS' : 'UDP';
-      this.bridgeProtoBadge.classList.toggle('path-tls', onTls);
+      this.bridgeProtoBadge.textContent = linked ? label : 'UDP';
+      this.bridgeProtoBadge.classList.toggle('path-tls', linked);
     }
-    if (!enabled) return;
+    if (!linked) return;
 
-    if (this.pathState) {
-      this.pathState.textContent = onTls ? `TLS (relay :${data.tls_relay_port || '?'})` : 'Direct UDP';
-      this.pathState.style.color = onTls ? 'var(--accent-text)' : '';
+    if (this.transportState) {
+      this.transportState.textContent = `WireGuard over ${label} (relay :${data.link_relay_port || '?'})`;
     }
-    if (this.tlsLinkState) {
-      const traffic = `↓ ${formatBytes(data.tls_bytes_rx)} ↑ ${formatBytes(data.tls_bytes_tx)}`;
-      const resets = data.tls_resets > 0 ? ` · ${data.tls_resets} rebuilt` : '';
-      this.tlsLinkState.title = '';
-      if (data.tls_connected) {
-        const rtt = data.tls_rtt_ms > 0 ? ` · ${data.tls_rtt_ms < 10 ? data.tls_rtt_ms.toFixed(1) : Math.round(data.tls_rtt_ms)} ms` : '';
-        const lost = data.tls_probe_failures > 0 ? ` · ${data.tls_probe_failures} probes lost` : '';
-        this.tlsLinkState.textContent = `Up · ${data.tls_direction || ''} ${data.tls_remote || ''}${rtt} · ${traffic}${lost}${resets}`;
-        this.tlsLinkState.style.color = 'var(--success)';
-      } else if (data.tls_verifying) {
-        this.tlsLinkState.textContent = 'Connected, checking it carries traffic...';
-        this.tlsLinkState.style.color = 'var(--warning)';
+    if (this.linkState) {
+      const traffic = `↓ ${formatBytes(data.link_bytes_rx)} ↑ ${formatBytes(data.link_bytes_tx)}`;
+      const resets = data.link_resets > 0 ? ` · ${data.link_resets} rebuilt` : '';
+      this.linkState.title = '';
+      if (data.link_connected) {
+        const rtt = data.link_rtt_ms > 0 ? ` · ${data.link_rtt_ms < 10 ? data.link_rtt_ms.toFixed(1) : Math.round(data.link_rtt_ms)} ms` : '';
+        const lost = data.link_probe_failures > 0 ? ` · ${data.link_probe_failures} probes lost` : '';
+        this.linkState.textContent = `Up · ${data.link_direction || ''} ${data.link_remote || ''}${rtt} · ${traffic}${lost}${resets}`;
+        this.linkState.style.color = 'var(--success)';
+      } else if (data.link_verifying) {
+        this.linkState.textContent = 'Connected, checking it carries traffic...';
+        this.linkState.style.color = 'var(--warning)';
       } else {
-        const err = data.tls_last_error || '';
+        const err = data.link_last_error || '';
         let text = 'Down · dialing';
-        if (/authenticat/i.test(err)) text = 'Down · authentication failed, check tls.secret';
+        if (/authenticat/i.test(err)) text = `Down · authentication failed, check ${kind}.secret`;
         else if (/health|probe/i.test(err)) text = 'Down · connection stalled, reconnecting';
-        this.tlsLinkState.textContent = text + resets;
-        this.tlsLinkState.title = err;
-        this.tlsLinkState.style.color = 'var(--warning)';
+        else if (/Permission denied|Host key|ssh/i.test(err)) text = 'Down · ' + err;
+        this.linkState.textContent = text + resets;
+        this.linkState.title = err;
+        this.linkState.style.color = 'var(--warning)';
       }
     }
-    if (onTls) {
-      if (this.btnHunt) this.btnHunt.title = 'Reconnect the TLS link';
-      if (this.btnRebind) this.btnRebind.title = 'Reconnect the TLS link on a new listener port';
-    }
+    if (this.btnHunt) this.btnHunt.title = `Reconnect the ${label} link`;
+    if (this.btnRebind) this.btnRebind.title = `Reconnect the ${label} link and move its listener`;
   }
 
   renderTunnelSwitcher(fullData) {
@@ -680,9 +664,8 @@ class AutoWGApp {
     let html = '';
     for (const evt of events) {
       const isConnected = evt.type === 'CONNECTED';
-      const isPath = evt.type === 'PATH';
-      const typeClass = isPath ? 'path' : (isConnected ? 'connected' : 'disconnected');
-      const typeLabel = isPath ? 'Path switch' : (isConnected ? 'Connected' : 'Disconnected');
+      const typeClass = isConnected ? 'connected' : 'disconnected';
+      const typeLabel = isConnected ? 'Connected' : 'Disconnected';
 
       let dirClass = 'bidirectional';
       if (evt.direction && evt.direction.includes('Local → Remote')) {
@@ -1135,6 +1118,8 @@ class AutoWGApp {
     const isIptables = tunnel.iptables !== false;
     const ping = tunnel.tunnel_ping || {};
     const tls = tunnel.tls || {};
+    const ssh = tunnel.ssh || {};
+    const transport = ['tls', 'ssh'].includes(tunnel.transport) ? tunnel.transport : 'direct';
     const text = (cls, value, placeholder = '') =>
       `<input type="text" class="form-input ${cls}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" spellcheck="false">`;
     const num = (cls, value, placeholder = '') =>
@@ -1158,9 +1143,10 @@ class AutoWGApp {
             ${formField('Name', text('t-name', tunnel.name || '', 'Frankfurt-VPS'), 'Shown in the dashboard and logs')}
             ${formField('Backend', backendSelect(tunnel.backend), 'AmneziaWG needs the awg tool and an interface created with awg-quick; its obfuscation settings stay in that interface config.')}
           </div>
+          ${formField('Transport', transportSelect(transport), 'How WireGuard\'s packets cross the network. Run one interface per transport and switch between them yourself.')}
           <div class="form-grid-2">
-            ${formField('Local port range', text('t-port-range', tunnel.port_range || '20000-30000', '20000-30000'), 'Redirected to the WireGuard listen port')}
-            ${formField('Remote port range', text('t-remote-port-range', tunnel.remote_port_range || '20000-30000', '20000-30000'), 'Ports tried on the peer when the link stalls')}
+            ${formField('Local port range', text('t-port-range', tunnel.port_range || '20000-30000', '20000-30000'), '<span class="range-note-direct">UDP, redirected to the WireGuard listen port</span><span class="range-note-link">TCP, redirected to the TLS listener or to sshd: keep other services out of it</span>')}
+            ${formField('Remote port range', text('t-remote-port-range', tunnel.remote_port_range || '20000-30000', '20000-30000'), 'Ports tried on the peer')}
           </div>
           ${formField('Target IPs / hostnames', area('t-target-ips', targetIPs.join('\n'), 2, '198.51.100.1\n2001:db8::1\nvps.example.com'), 'One per line, IPv4, IPv6 or domains. Rotated when one is blocked; domains are re-resolved on every hunt.')}
           ${formField('Peer public key', text('t-peer-pubkey', tunnel.peer_public_key || '', 'Optional'), 'Detected from the interface when empty')}
@@ -1170,32 +1156,49 @@ class AutoWGApp {
           </div>
         </div>
 
-        <div class="group group-tls ${tls.enabled ? '' : 'off'}">
-          <div class="group-label">
-            UDP over TLS fallback
-            ${formToggle('t-tls-enabled', !!tls.enabled, 'Enabled')}
-          </div>
-          <p class="group-note">A second path for when direct WireGuard is blocked: both peers keep a TLS connection open and WireGuard switches between the two paths. Needs Auto-WG with the same secret on both peers.</p>
+        <div class="group group-link" data-for="tls ssh">
+          <div class="group-label">Link</div>
+          <p class="group-note" data-for="tls">Both peers keep a TLS 1.3 connection open (Auto-WG on both sides, same secret).</p>
+          <p class="group-note" data-for="ssh">A genuine OpenSSH session through the peer's sshd. Needs the ssh client here and sshd on the peer; see the README for the sshd setup.</p>
           <div class="group-fields">
-            ${formField('Shared secret', secretInput(tls.secret || ''), 'Identical on both peers, at least 16 characters. It is masked after saving, so read it from the config file when setting up the other peer.')}
-            <div class="form-grid-2">
-              ${formField('TCP port range (local)', text('t-tls-port-range', tls.port_range || '', 'same as the UDP range'), 'Every incoming TCP port in this range is redirected to the TLS listener: keep other services out of it')}
-              ${formField('TCP port range (remote)', text('t-tls-remote-range', tls.remote_port_range || '', 'same as the remote UDP range'), 'Ports tried on the peer')}
+            ${formField('Shared secret', secretInput(transport === 'ssh' ? (ssh.secret || '') : (tls.secret || '')), 'Identical on both peers, at least 16 characters. It is masked after saving, so read it from the config file when setting up the other peer.')}
+            <div class="form-grid-3">
+              ${formField('Reconnect after', text('t-link-reconnect', formatDuration((transport === 'ssh' ? ssh : tls).reconnect_after, '10s'), '10s'), 'Rebuild the connection when WireGuard stays dead this long')}
+              ${formField('Dial interval', text('t-link-dial', formatDuration((transport === 'ssh' ? ssh : tls).dial_interval, '1s'), '1s'))}
+              ${formField('Relay port', num('t-link-relay', (transport === 'ssh' ? ssh : tls).relay_port || 0, '0'), '0 = automatic (loopback UDP)')}
             </div>
             <div class="form-grid-3">
-              ${formField('Switch path after', text('t-tls-fallback', formatDuration(tls.fallback_after, '15s'), '15s'), 'How long a path must be dead')}
-              ${formField('Dial interval', text('t-tls-dial', formatDuration(tls.dial_interval, '1s'), '1s'))}
-              ${formField('Relay port', num('t-tls-relay', tls.relay_port || 0, '0'), '0 = automatic (loopback UDP)')}
+              ${formField('Health probe every', text('t-link-health-interval', formatDuration((transport === 'ssh' ? ssh : tls).health_interval, '3s'), '3s'), 'Ping/pong over the link')}
+              ${formField('Probe timeout', text('t-link-health-timeout', formatDuration((transport === 'ssh' ? ssh : tls).health_timeout, '2s'), '2s'))}
+              ${formField('Failures before reconnect', num('t-link-health-failures', (transport === 'ssh' ? ssh : tls).health_failures || 3, '3'), 'Consecutive unanswered probes')}
             </div>
-            <div class="form-grid-3">
-              ${formField('Health probe every', text('t-tls-health-interval', formatDuration(tls.health_interval, '3s'), '3s'), 'Ping/pong over the TLS link')}
-              ${formField('Probe timeout', text('t-tls-health-timeout', formatDuration(tls.health_timeout, '2s'), '2s'))}
-              ${formField('Failures before reconnect', num('t-tls-health-failures', tls.health_failures || 3, '3'), 'Consecutive unanswered probes')}
-            </div>
+            ${formField('Packet padding', paddingSelect((transport === 'ssh' ? ssh : tls).padding), 'Hides WireGuard\'s packet sizes: bucket rounds every write up to a few fixed sizes, random appends random filler')}
+          </div>
+        </div>
+
+        <div class="group group-tls" data-for="tls">
+          <div class="group-label">TLS</div>
+          <div class="group-fields">
             <div class="form-grid-2">
               ${formField('SNI (optional)', text('t-tls-sni', tls.sni || '', 'www.example.com'), 'Server name sent in the TLS handshake')}
               ${formField('ALPN (optional)', text('t-tls-alpn', (tls.alpn || []).join(', '), 'h2, http/1.1'), 'Comma separated')}
             </div>
+          </div>
+        </div>
+
+        <div class="group group-ssh" data-for="ssh">
+          <div class="group-label">SSH</div>
+          <div class="group-fields">
+            <div class="form-grid-3">
+              ${formField('User', text('t-ssh-user', ssh.user || '', 'autowg'), 'Account on the peer\'s sshd')}
+              ${formField('sshd port here', num('t-ssh-sshd-port', ssh.sshd_port || 22, '22'), 'The local port range is redirected to this host\'s sshd')}
+              ${formField('Link port', num('t-ssh-link-port', ssh.link_port || 40022, '40022'), 'Loopback port the peer\'s ssh forwards to; same on both peers')}
+            </div>
+            <div class="form-grid-2">
+              ${formField('Identity file', text('t-ssh-identity', ssh.identity_file || '', '/etc/auto-wg/id_ed25519'), 'Private key used to log in. Leave empty to only accept connections.')}
+              ${formField('Peer host key', text('t-ssh-hostkey', ssh.host_key || '', 'ssh-ed25519 AAAA...'), 'The peer sshd\'s public key (cat /etc/ssh/ssh_host_ed25519_key.pub)')}
+            </div>
+            ${formField('ssh binary', text('t-ssh-path', ssh.ssh_path || '', 'ssh'), 'OpenSSH client to run')}
           </div>
         </div>
 
@@ -1255,10 +1258,22 @@ class AutoWGApp {
       sw?.addEventListener('change', () => group?.classList.toggle('off', !sw.checked));
     };
     bindGroupSwitch('.t-ping-enabled', '.group-ping');
-    bindGroupSwitch('.t-tls-enabled', '.group-tls');
+
+    // Show only the groups of the selected transport
+    const transportEl = card.querySelector('.t-transport');
+    const applyTransport = () => {
+      const kind = transportEl?.value || 'direct';
+      card.querySelectorAll('[data-for]').forEach(el => {
+        el.hidden = !el.dataset.for.split(' ').includes(kind);
+      });
+      card.querySelectorAll('.range-note-direct').forEach(el => { el.hidden = kind !== 'direct'; });
+      card.querySelectorAll('.range-note-link').forEach(el => { el.hidden = kind === 'direct'; });
+    };
+    transportEl?.addEventListener('change', applyTransport);
+    applyTransport();
 
     // Secret field: generate a random secret (shown in clear so it can be copied) or reveal the value
-    const secretEl = card.querySelector('.t-tls-secret');
+    const secretEl = card.querySelector('.t-link-secret');
     card.querySelector('.btn-gen-secret')?.addEventListener('click', () => {
       const bytes = crypto.getRandomValues(new Uint8Array(24));
       secretEl.value = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_');
@@ -1332,19 +1347,30 @@ class AutoWGApp {
         return Number.isNaN(n) ? def : n;
       };
       const val = (sel) => card.querySelector(sel)?.value.trim() || '';
-      const tlsCfg = {
-        enabled: card.querySelector('.t-tls-enabled')?.checked ?? false,
-        secret: card.querySelector('.t-tls-secret')?.value || '',
-        port_range: val('.t-tls-port-range'),
-        remote_port_range: val('.t-tls-remote-range'),
-        relay_port: intVal('.t-tls-relay', 0),
-        fallback_after: val('.t-tls-fallback') || '15s',
-        dial_interval: val('.t-tls-dial') || '1s',
-        health_interval: val('.t-tls-health-interval') || '3s',
-        health_timeout: val('.t-tls-health-timeout') || '2s',
-        health_failures: intVal('.t-tls-health-failures', 3),
+      const transport = card.querySelector('.t-transport')?.value || 'direct';
+      const linkCfg = {
+        secret: card.querySelector('.t-link-secret')?.value || '',
+        relay_port: intVal('.t-link-relay', 0),
+        reconnect_after: val('.t-link-reconnect') || '10s',
+        dial_interval: val('.t-link-dial') || '1s',
+        health_interval: val('.t-link-health-interval') || '3s',
+        health_timeout: val('.t-link-health-timeout') || '2s',
+        health_failures: intVal('.t-link-health-failures', 3),
+        padding: card.querySelector('.t-link-padding')?.value || 'off'
+      };
+      const tlsCfg = transport !== 'tls' ? {} : {
+        ...linkCfg,
         sni: val('.t-tls-sni'),
         alpn: val('.t-tls-alpn').split(',').map(x => x.trim()).filter(x => x.length > 0)
+      };
+      const sshCfg = transport !== 'ssh' ? {} : {
+        ...linkCfg,
+        user: val('.t-ssh-user'),
+        identity_file: val('.t-ssh-identity'),
+        host_key: val('.t-ssh-hostkey'),
+        ssh_path: val('.t-ssh-path'),
+        sshd_port: intVal('.t-ssh-sshd-port', 22),
+        link_port: intVal('.t-ssh-link-port', 40022)
       };
 
       const postUpRaw = card.querySelector('.t-post-up')?.value || '';
@@ -1372,7 +1398,9 @@ class AutoWGApp {
           interval: pingInterval,
           failure_threshold: pingThreshold
         },
-        tls: tlsCfg
+        transport: transport,
+        tls: tlsCfg,
+        ssh: sshCfg
       };
       if (historyFile) tunnelObj.history_file = historyFile;
       if (postUp.length > 0) tunnelObj.post_up = postUp;
@@ -1462,22 +1490,32 @@ class AutoWGApp {
         if (t.tunnel_ping.failure_threshold) lines.push(`      failure_threshold: ${t.tunnel_ping.failure_threshold}`);
       }
 
-      const tl = t.tls;
-      if (tl && (tl.enabled || tl.secret)) {
-        lines.push('    tls:');
-        lines.push(`      enabled: ${tl.enabled ? 'true' : 'false'}`);
-        if (tl.secret) lines.push(`      secret: ${JSON.stringify(tl.secret)}`);
-        if (tl.port_range) lines.push(`      port_range: "${tl.port_range}"`);
-        if (tl.remote_port_range) lines.push(`      remote_port_range: "${tl.remote_port_range}"`);
-        if (tl.relay_port > 0) lines.push(`      relay_port: ${tl.relay_port}`);
-        if (tl.fallback_after) lines.push(`      fallback_after: "${tl.fallback_after}"`);
-        if (tl.dial_interval) lines.push(`      dial_interval: "${tl.dial_interval}"`);
-        if (tl.health_interval) lines.push(`      health_interval: "${tl.health_interval}"`);
-        if (tl.health_timeout) lines.push(`      health_timeout: "${tl.health_timeout}"`);
-        if (tl.health_failures > 0) lines.push(`      health_failures: ${tl.health_failures}`);
-        if (tl.sni) lines.push(`      sni: ${JSON.stringify(tl.sni)}`);
-        if (tl.alpn && tl.alpn.length > 0) lines.push(`      alpn: [${tl.alpn.map(a => JSON.stringify(a)).join(', ')}]`);
-      }
+      if (t.transport && t.transport !== 'direct') lines.push(`    transport: ${t.transport}`);
+      const linkBlock = (name, b, extra) => {
+        if (!b || !b.secret) return;
+        lines.push(`    ${name}:`);
+        lines.push(`      secret: ${JSON.stringify(b.secret)}`);
+        if (b.relay_port > 0) lines.push(`      relay_port: ${b.relay_port}`);
+        if (b.reconnect_after) lines.push(`      reconnect_after: "${b.reconnect_after}"`);
+        if (b.dial_interval) lines.push(`      dial_interval: "${b.dial_interval}"`);
+        if (b.health_interval) lines.push(`      health_interval: "${b.health_interval}"`);
+        if (b.health_timeout) lines.push(`      health_timeout: "${b.health_timeout}"`);
+        if (b.health_failures > 0) lines.push(`      health_failures: ${b.health_failures}`);
+        if (b.padding && b.padding !== 'off') lines.push(`      padding: ${b.padding}`);
+        extra(b);
+      };
+      if (t.transport === 'tls') linkBlock('tls', t.tls, (b) => {
+        if (b.sni) lines.push(`      sni: ${JSON.stringify(b.sni)}`);
+        if (b.alpn && b.alpn.length > 0) lines.push(`      alpn: [${b.alpn.map(a => JSON.stringify(a)).join(', ')}]`);
+      });
+      if (t.transport === 'ssh') linkBlock('ssh', t.ssh, (b) => {
+        if (b.user) lines.push(`      user: ${JSON.stringify(b.user)}`);
+        if (b.identity_file) lines.push(`      identity_file: ${JSON.stringify(b.identity_file)}`);
+        if (b.host_key) lines.push(`      host_key: ${JSON.stringify(b.host_key)}`);
+        if (b.ssh_path) lines.push(`      ssh_path: ${JSON.stringify(b.ssh_path)}`);
+        if (b.sshd_port) lines.push(`      sshd_port: ${b.sshd_port}`);
+        if (b.link_port) lines.push(`      link_port: ${b.link_port}`);
+      });
 
       if (t.check_interval && t.check_interval !== '3s') lines.push(`    check_interval: "${t.check_interval}"`);
       if (t.handshake_timeout && t.handshake_timeout !== '60s') lines.push(`    handshake_timeout: "${t.handshake_timeout}"`);
@@ -1732,8 +1770,19 @@ function backendSelect(current) {
   return `<select class="form-input t-backend">${option('wireguard', 'WireGuard')}${option('amneziawg', 'AmneziaWG')}</select>`;
 }
 
+function transportSelect(current) {
+  const option = (v, label) => `<option value="${v}" ${v === current ? 'selected' : ''}>${label}</option>`;
+  return `<select class="form-input t-transport">${option('direct', 'Direct (WireGuard over UDP)')}${option('tls', 'WireGuard over TLS')}${option('ssh', 'WireGuard over SSH (real OpenSSH)')}</select>`;
+}
+
+function paddingSelect(current) {
+  const value = ['bucket', 'random'].includes(current) ? current : 'off';
+  const option = (v, label) => `<option value="${v}" ${v === value ? 'selected' : ''}>${label}</option>`;
+  return `<select class="form-input t-link-padding">${option('off', 'Off')}${option('bucket', 'Bucket (a few fixed sizes)')}${option('random', 'Random')}</select>`;
+}
+
 function secretInput(value) {
-  return `<div class="input-row"><input type="password" class="form-input t-tls-secret" value="${escapeHtml(value)}" placeholder="Same value on both peers" spellcheck="false" autocomplete="off"><button type="button" class="btn btn-secondary btn-sm btn-gen-secret">Generate</button><button type="button" class="btn btn-ghost btn-sm btn-show-secret">Show</button></div>`;
+  return `<div class="input-row"><input type="password" class="form-input t-link-secret" value="${escapeHtml(value)}" placeholder="Same value on both peers" spellcheck="false" autocomplete="off"><button type="button" class="btn btn-secondary btn-sm btn-gen-secret">Generate</button><button type="button" class="btn btn-ghost btn-sm btn-show-secret">Show</button></div>`;
 }
 
 function formToggle(cls, checked, text) {

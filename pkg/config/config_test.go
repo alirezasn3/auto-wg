@@ -261,67 +261,153 @@ func TestBackendDefaultsAndValidation(t *testing.T) {
 	}
 }
 
-func TestTLSDefaultsAndValidation(t *testing.T) {
-	good := func() *Config {
+func linkOf(secret string) LinkConfig { return LinkConfig{Secret: secret} }
+
+func TestTransportDefaults(t *testing.T) {
+	cfg := &Config{Mode: "server", Tunnels: []TunnelConfig{
+		{Interface: "wg0"},
+		{Interface: "wg1", Transport: "TLS", TLS: TLSConfig{LinkConfig: linkOf("0123456789abcdef")}},
+		{Interface: "wg2", Transport: "openssh", SSH: SSHConfig{LinkConfig: linkOf("0123456789abcdef")}},
+	}}
+	SetDefaults(cfg)
+
+	if cfg.Tunnels[0].Transport != TransportDirect || cfg.Tunnels[1].Transport != TransportTLS || cfg.Tunnels[2].Transport != TransportSSH {
+		t.Fatalf("transports not normalised: %q %q %q", cfg.Tunnels[0].Transport, cfg.Tunnels[1].Transport, cfg.Tunnels[2].Transport)
+	}
+	l := cfg.Tunnels[1].TLS.LinkConfig
+	if l.DialInterval != time.Second || l.HealthInterval != 3*time.Second || l.HealthTimeout != 2*time.Second || l.HealthFailures != 3 || l.ReconnectAfter != 10*time.Second {
+		t.Fatalf("link defaults: %+v", l)
+	}
+	ssh := cfg.Tunnels[2].SSH
+	if ssh.User != "autowg" || ssh.SSHPath != "ssh" || ssh.SshdPort != 22 || ssh.LinkPort != 40022 || ssh.HealthFailures != 3 {
+		t.Fatalf("ssh defaults: %+v", ssh)
+	}
+	// Only the block of the active transport gets defaults.
+	if cfg.Tunnels[0].TLS.HealthInterval != 0 || cfg.Tunnels[0].SSH.LinkPort != 0 {
+		t.Fatal("a direct tunnel must not get transport defaults")
+	}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("defaults must validate: %v", err)
+	}
+}
+
+func TestLegacyTLSBlockBecomesATLSTransport(t *testing.T) {
+	cfg := &Config{Mode: "server", Tunnels: []TunnelConfig{{
+		Interface: "wg0", PortRange: "20000-24999", RemotePortRange: "25000-29999",
+		TLS: TLSConfig{LinkConfig: linkOf("0123456789abcdef"), Enabled: true, FallbackAfter: 15 * time.Second, PortRange: "443-8443", RemotePortRange: "9000-9100"},
+	}}}
+	SetDefaults(cfg)
+	tn := cfg.Tunnels[0]
+	if tn.Transport != TransportTLS {
+		t.Fatalf("legacy tls.enabled must select transport tls, got %q", tn.Transport)
+	}
+	if tn.PortRange != "443-8443" || tn.RemotePortRange != "9000-9100" {
+		t.Fatalf("legacy tls ranges must become the tunnel ranges, got %s / %s", tn.PortRange, tn.RemotePortRange)
+	}
+	if tn.TLS.Enabled || tn.TLS.FallbackAfter != 0 || tn.TLS.PortRange != "" || tn.TLS.RemotePortRange != "" {
+		t.Fatalf("legacy fields must be cleared: %+v", tn.TLS)
+	}
+	if err := Validate(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// An explicit transport wins; the legacy block is ignored.
+	explicit := &Config{Mode: "server", Tunnels: []TunnelConfig{{Interface: "wg0", Transport: "direct", TLS: TLSConfig{Enabled: true}}}}
+	SetDefaults(explicit)
+	if explicit.Tunnels[0].Transport != TransportDirect {
+		t.Fatal("an explicit transport must not be overridden")
+	}
+}
+
+func TestTransportValidation(t *testing.T) {
+	tls := func() *Config {
 		c := &Config{Mode: "server", Tunnels: []TunnelConfig{{
-			Interface: "wg0", PortRange: "20000-24999", RemotePortRange: "25000-29999", Iptables: true,
-			TLS: TLSConfig{Enabled: true, Secret: "0123456789abcdef"},
+			Interface: "wg0", Transport: "tls", PortRange: "20000-24999", RemotePortRange: "25000-29999", Iptables: true,
+			TLS: TLSConfig{LinkConfig: linkOf("0123456789abcdef")},
 		}}}
 		SetDefaults(c)
 		return c
 	}
+	ssh := func() *Config {
+		c := &Config{Mode: "server", Tunnels: []TunnelConfig{{
+			Interface: "wg0", Transport: "ssh", PortRange: "20000-24999", RemotePortRange: "25000-29999", Iptables: true,
+			SSH: SSHConfig{LinkConfig: linkOf("0123456789abcdef"), IdentityFile: "/etc/autowg/id_ed25519", HostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample"},
+		}}}
+		SetDefaults(c)
+		return c
+	}
+	if err := Validate(tls()); err != nil {
+		t.Fatalf("valid tls config rejected: %v", err)
+	}
+	if err := Validate(ssh()); err != nil {
+		t.Fatalf("valid ssh config rejected: %v", err)
+	}
 
-	c := good()
-	tl := c.Tunnels[0].TLS
-	if tl.PortRange != "20000-24999" || tl.RemotePortRange != "25000-29999" || tl.FallbackAfter != 15*time.Second || tl.DialInterval != time.Second {
-		t.Fatalf("unexpected defaults: %+v", tl)
+	bad := map[string]func() *Config{}
+	add := func(name string, base func() *Config, mutate func(*TunnelConfig)) {
+		bad[name] = func() *Config { c := base(); mutate(&c.Tunnels[0]); return c }
 	}
-	if tl.HealthInterval != 3*time.Second || tl.HealthTimeout != 2*time.Second || tl.HealthFailures != 3 {
-		t.Fatalf("unexpected health defaults: %+v", tl)
-	}
-	if err := Validate(c); err != nil {
-		t.Fatalf("defaults must validate: %v", err)
-	}
-
-	bad := map[string]func(*Config){
-		"short secret":   func(c *Config) { c.Tunnels[0].TLS.Secret = "short" },
-		"passive":        func(c *Config) { f := false; c.Tunnels[0].Hunting = &f },
-		"bad range":      func(c *Config) { c.Tunnels[0].TLS.PortRange = "nonsense" },
-		"fast fallback":  func(c *Config) { c.Tunnels[0].TLS.FallbackAfter = time.Second },
-		"fast dial":      func(c *Config) { c.Tunnels[0].TLS.DialInterval = time.Millisecond },
-		"fast probes":    func(c *Config) { c.Tunnels[0].TLS.HealthInterval = 500 * time.Millisecond },
-		"tiny timeout":   func(c *Config) { c.Tunnels[0].TLS.HealthTimeout = 100 * time.Millisecond },
-		"huge timeout":   func(c *Config) { c.Tunnels[0].TLS.HealthTimeout = time.Minute },
-		"no failures":    func(c *Config) { c.Tunnels[0].TLS.HealthFailures = -1 },
-		"many failures":  func(c *Config) { c.Tunnels[0].TLS.HealthFailures = 50 },
-		"relay in range": func(c *Config) { c.Tunnels[0].TLS.RelayPort = 21000 },
-		"low relay":      func(c *Config) { c.Tunnels[0].TLS.RelayPort = 80 },
-		"bad sni":        func(c *Config) { c.Tunnels[0].TLS.SNI = "not a host" },
-		"empty alpn":     func(c *Config) { c.Tunnels[0].TLS.ALPN = []string{"h2", " "} },
-	}
-	for name, mutate := range bad {
-		c := good()
-		mutate(c)
-		if err := Validate(c); err == nil {
+	add("unknown transport", tls, func(t *TunnelConfig) { t.Transport = "carrier-pigeon" })
+	add("short secret", tls, func(t *TunnelConfig) { t.TLS.Secret = "short" })
+	add("passive", tls, func(t *TunnelConfig) { f := false; t.Hunting = &f })
+	add("bad range", tls, func(t *TunnelConfig) { t.PortRange = "nonsense" })
+	add("fast dial", tls, func(t *TunnelConfig) { t.TLS.DialInterval = time.Millisecond })
+	add("fast probes", tls, func(t *TunnelConfig) { t.TLS.HealthInterval = 500 * time.Millisecond })
+	add("tiny timeout", tls, func(t *TunnelConfig) { t.TLS.HealthTimeout = 100 * time.Millisecond })
+	add("huge timeout", tls, func(t *TunnelConfig) { t.TLS.HealthTimeout = time.Minute })
+	add("no failures", tls, func(t *TunnelConfig) { t.TLS.HealthFailures = -1 })
+	add("many failures", tls, func(t *TunnelConfig) { t.TLS.HealthFailures = 50 })
+	add("fast reconnect", tls, func(t *TunnelConfig) { t.TLS.ReconnectAfter = time.Second })
+	add("low relay", tls, func(t *TunnelConfig) { t.TLS.RelayPort = 80 })
+	add("bad padding", tls, func(t *TunnelConfig) { t.TLS.Padding = "lots" })
+	add("bad sni", tls, func(t *TunnelConfig) { t.TLS.SNI = "not a host" })
+	add("empty alpn", tls, func(t *TunnelConfig) { t.TLS.ALPN = []string{"h2", " "} })
+	add("ssh short secret", ssh, func(t *TunnelConfig) { t.SSH.Secret = "x" })
+	add("ssh no host key", ssh, func(t *TunnelConfig) { t.SSH.HostKey = "" })
+	add("ssh junk host key", ssh, func(t *TunnelConfig) { t.SSH.HostKey = "hello" })
+	add("ssh no user", ssh, func(t *TunnelConfig) { t.SSH.User = "" })
+	add("ssh odd user", ssh, func(t *TunnelConfig) { t.SSH.User = "a b@c" })
+	add("ssh bad sshd port", ssh, func(t *TunnelConfig) { t.SSH.SshdPort = 70000 })
+	add("ssh low link port", ssh, func(t *TunnelConfig) { t.SSH.LinkPort = 22 })
+	for name, mk := range bad {
+		if err := Validate(mk()); err == nil {
 			t.Errorf("%s: expected a validation error", name)
 		}
 	}
 
-	// A disabled block is never validated and gets no defaults.
-	off := &Config{Mode: "server", Tunnels: []TunnelConfig{{Interface: "wg0", TLS: TLSConfig{Secret: "x"}}}}
-	SetDefaults(off)
-	if err := Validate(off); err != nil || off.Tunnels[0].TLS.PortRange != "" {
-		t.Errorf("disabled tls must be left alone: %v %+v", err, off.Tunnels[0].TLS)
+	// An accept-only ssh peer needs neither an identity nor the peer's host key.
+	accept := ssh()
+	accept.Tunnels[0].SSH.IdentityFile, accept.Tunnels[0].SSH.HostKey = "", ""
+	if err := Validate(accept); err != nil {
+		t.Fatalf("an ssh peer without an identity only accepts and must validate: %v", err)
 	}
 
-	// TCP ranges of two iptables-managed tunnels must not overlap.
-	two := &Config{Mode: "server", Tunnels: []TunnelConfig{
-		{Interface: "wg0", PortRange: "20000-21000", Iptables: true, TLS: TLSConfig{Enabled: true, Secret: "0123456789abcdef", PortRange: "30000-31000"}},
-		{Interface: "wg1", PortRange: "22000-23000", Iptables: true, TLS: TLSConfig{Enabled: true, Secret: "0123456789abcdef", PortRange: "30500-31500"}},
-	}}
-	SetDefaults(two)
-	if err := Validate(two); err == nil {
-		t.Error("overlapping tls port ranges must be rejected")
+	// A block of a transport that is not in use is never validated.
+	direct := &Config{Mode: "server", Tunnels: []TunnelConfig{{Interface: "wg0", TLS: TLSConfig{LinkConfig: linkOf("x")}, SSH: SSHConfig{LinkConfig: linkOf("y")}}}}
+	SetDefaults(direct)
+	if err := Validate(direct); err != nil {
+		t.Fatalf("unused transport blocks must be ignored: %v", err)
+	}
+}
+
+func TestPortRangeOverlapIsPerProtocol(t *testing.T) {
+	mk := func(a, b string, ta, tb string) *Config {
+		c := &Config{Mode: "server", Tunnels: []TunnelConfig{
+			{Interface: "wg0", Transport: ta, PortRange: a, Iptables: true, TLS: TLSConfig{LinkConfig: linkOf("0123456789abcdef")}, SSH: SSHConfig{LinkConfig: linkOf("0123456789abcdef")}},
+			{Interface: "wg1", Transport: tb, PortRange: b, Iptables: true, TLS: TLSConfig{LinkConfig: linkOf("0123456789abcdef")}, SSH: SSHConfig{LinkConfig: linkOf("0123456789abcdef")}},
+		}}
+		SetDefaults(c)
+		return c
+	}
+	// The same numbers on a UDP tunnel and a TCP tunnel are fine: they are different port spaces.
+	if err := Validate(mk("20000-21000", "20000-21000", "direct", "tls")); err != nil {
+		t.Fatalf("a UDP and a TCP range may overlap: %v", err)
+	}
+	if err := Validate(mk("20000-21000", "20500-21500", "direct", "direct")); err == nil {
+		t.Fatal("two UDP ranges must not overlap")
+	}
+	if err := Validate(mk("20000-21000", "20500-21500", "tls", "ssh")); err == nil {
+		t.Fatal("a tls and an ssh range are both TCP and must not overlap")
 	}
 }
 
@@ -411,12 +497,12 @@ func TestMaskSecretsConfig(t *testing.T) {
 	cfg := Config{
 		Web: WebConfig{Password: "pw"},
 		Tunnels: []TunnelConfig{
-			{Interface: "wg0", TLS: TLSConfig{Secret: "s0"}},
+			{Interface: "wg0", TLS: TLSConfig{LinkConfig: linkOf("s0")}, SSH: SSHConfig{LinkConfig: linkOf("s1")}},
 			{Interface: "wg1"},
 		},
 	}
 	masked := MaskSecrets(cfg)
-	if masked.Web.Password != MaskedSecret || masked.Tunnels[0].TLS.Secret != MaskedSecret || masked.Tunnels[1].TLS.Secret != "" {
+	if masked.Web.Password != MaskedSecret || masked.Tunnels[0].TLS.Secret != MaskedSecret || masked.Tunnels[0].SSH.Secret != MaskedSecret || masked.Tunnels[1].TLS.Secret != "" {
 		t.Fatalf("unexpected masking: %+v", masked)
 	}
 	if cfg.Tunnels[0].TLS.Secret != "s0" || cfg.Web.Password != "pw" {
@@ -428,11 +514,62 @@ func TestMaskSecretsConfig(t *testing.T) {
 	if err := RestoreMaskedSecretsConfig(&back, &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if back.Web.Password != "pw" || back.Tunnels[0].TLS.Secret != "s0" {
+	if back.Web.Password != "pw" || back.Tunnels[0].TLS.Secret != "s0" || back.Tunnels[0].SSH.Secret != "s1" {
 		t.Fatalf("restore failed: %+v", back)
 	}
-	gone := Config{Tunnels: []TunnelConfig{{Interface: "other", TLS: TLSConfig{Secret: MaskedSecret}}}}
+	gone := Config{Tunnels: []TunnelConfig{{Interface: "other", TLS: TLSConfig{LinkConfig: linkOf(MaskedSecret)}}}}
 	if err := RestoreMaskedSecretsConfig(&gone, &cfg); err == nil {
 		t.Fatal("expected an error when there is nothing stored for the interface")
+	}
+}
+
+func TestPickRandomPortExcluding(t *testing.T) {
+	for i := 0; i < 500; i++ {
+		got, err := PickRandomPortExcluding("20000-20002", 20001)
+		if err != nil || got == 20001 || got < 20000 || got > 20002 {
+			t.Fatalf("got %d, err %v", got, err)
+		}
+	}
+	// Excluded ports outside the range are irrelevant; a one-port range cannot avoid its only port.
+	if got, _ := PickRandomPortExcluding("30000-30000", 30000); got != 30000 {
+		t.Fatalf("single-port range must still return its port, got %d", got)
+	}
+	if got, _ := PickRandomPortExcluding("30000-30001", 5, 30000, 99999); got != 30001 {
+		t.Fatalf("expected the only free port, got %d", got)
+	}
+	if _, err := PickRandomPortExcluding("nonsense"); err == nil {
+		t.Fatal("bad range must fail")
+	}
+}
+
+func TestMaskAndRestoreYAMLCoversSSHSecrets(t *testing.T) {
+	const doc = `tunnels:
+  - interface: wgTls
+    transport: tls
+    tls:
+      secret: "tls-secret-value-0123"
+  - interface: wgSsh
+    transport: ssh
+    ssh:
+      secret: "ssh-secret-value-4567"
+      user: autowg
+`
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(doc), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	masked := MaskYAML(doc)
+	if strings.Contains(masked, "tls-secret-value-0123") || strings.Contains(masked, "ssh-secret-value-4567") {
+		t.Fatalf("a secret leaked:\n%s", masked)
+	}
+	if strings.Count(masked, MaskedSecret) != 2 || !strings.Contains(masked, "user: autowg") {
+		t.Fatalf("expected exactly the two secrets masked:\n%s", masked)
+	}
+	restored, err := RestoreMaskedSecrets(masked, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored != doc {
+		t.Fatalf("restore must reproduce the original text byte for byte:\n%s", restored)
 	}
 }

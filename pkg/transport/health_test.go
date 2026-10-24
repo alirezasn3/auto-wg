@@ -1,4 +1,4 @@
-package tlstun
+package transport
 
 import (
 	"context"
@@ -10,8 +10,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"auto-wg/pkg/config"
 )
 
 // stallProxy is a TCP proxy that can be told to silently swallow everything, like a middlebox that lets
@@ -80,7 +78,7 @@ func (p *stallProxy) serve(client net.Conn) {
 }
 
 // healthCfg returns a TLS config with fast probes so the tests do not take minutes.
-func healthCfg(local, remote string) config.TLSConfig {
+func healthCfg(local, remote string) Options {
 	return testCfg(local, remote, "shared-secret-1234")
 }
 
@@ -97,7 +95,7 @@ func proxiedPair(t *testing.T) (a, b *Link, proxy *stallProxy, ra, rb *recorder)
 		t.Fatal(err)
 	}
 	b.mu.Lock()
-	bAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(b.listenPort))
+	bAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(b.car.listenPort()))
 	b.mu.Unlock()
 
 	proxy = newStallProxy(t, bAddr)
@@ -257,7 +255,7 @@ func TestPingIsEchoedByteForByte(t *testing.T) {
 	}
 	defer l.Stop()
 	l.mu.Lock()
-	port := l.listenPort
+	port := l.car.listenPort()
 	l.mu.Unlock()
 
 	raw, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
@@ -270,13 +268,13 @@ func TestPingIsEchoedByteForByte(t *testing.T) {
 	if err := tc.Handshake(); err != nil {
 		t.Fatal(err)
 	}
-	if err := authenticate(tc, "shared-secret-1234", true); err != nil {
+	if err := authTLS(tc, "shared-secret-1234", true); err != nil {
 		t.Fatal(err)
 	}
 
 	// The link verifies us first with its own probes; answer them like a real peer, then ping it ourselves.
 	probe := newProbe(0x1122334455667788, 777)
-	if err := writeControl(tc, probe); err != nil {
+	if err := writeControl(tc, probe, padOff); err != nil {
 		t.Fatal(err)
 	}
 	buf := make([]byte, maxFrame)
@@ -291,7 +289,7 @@ func TestPingIsEchoedByteForByte(t *testing.T) {
 		if p[0] == ctrlPing { // its verification probe: echo it
 			pong := append([]byte(nil), p...)
 			pong[0] = ctrlPong
-			if err := writeControl(tc, pong); err != nil {
+			if err := writeControl(tc, pong, padOff); err != nil {
 				t.Fatal(err)
 			}
 			continue
@@ -309,7 +307,7 @@ func TestResetConnDropsOnlyTheConnection(t *testing.T) {
 	a, b, _, _ := pair(t, 3, "", "", "shared-secret-1234", "shared-secret-1234")
 	waitFor(t, 5*time.Second, "link up", func() bool { return a.Connected() && b.Connected() })
 	a.mu.Lock()
-	portBefore := a.listenPort
+	portBefore := a.car.listenPort()
 	a.mu.Unlock()
 
 	if !a.ResetConn() {
@@ -319,7 +317,7 @@ func TestResetConnDropsOnlyTheConnection(t *testing.T) {
 	waitFor(t, 6*time.Second, "link rebuilt", func() bool { return a.Connected() && b.Connected() })
 
 	a.mu.Lock()
-	portAfter := a.listenPort
+	portAfter := a.car.listenPort()
 	a.mu.Unlock()
 	if portAfter != portBefore {
 		t.Fatalf("ResetConn must keep the listener port (%d -> %d)", portBefore, portAfter)
