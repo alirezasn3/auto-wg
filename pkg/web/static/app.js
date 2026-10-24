@@ -289,7 +289,59 @@ class AutoWGApp {
     });
   }
 
+  // Version label and update button. The server asks GitHub for the latest release (cached for a few minutes).
+  async checkForUpdate() {
+    const badge = document.getElementById('updateBadge');
+    const label = document.getElementById('appVersion');
+    try {
+      const res = await fetch('/api/update');
+      const info = await res.json().catch(() => ({}));
+      if (label && info.current) label.textContent = info.current;
+      if (!badge) return;
+      if (!res.ok || !info.available) {
+        badge.hidden = true;
+        return;
+      }
+      badge.hidden = false;
+      badge.disabled = false;
+      badge.textContent = `Update to ${info.latest}`;
+      badge.title = `Running ${info.current}. Installs ${info.latest} from GitHub (checksum verified) and restarts Auto-WG.`;
+      badge.onclick = () => this.installUpdate(info);
+    } catch (err) {
+      // No network or an older server without updates: leave the label as it is
+    }
+    if (!this.updateTimer) this.updateTimer = setInterval(() => this.checkForUpdate(), 6 * 60 * 60 * 1000);
+  }
+
+  async installUpdate(info) {
+    if (!confirm(`Install ${info.latest} (running ${info.current})?\n\nAuto-WG downloads the release, verifies its checksum and restarts. Tunnels are torn down and re-created, so the connection drops for a few seconds.`)) return;
+    const badge = document.getElementById('updateBadge');
+    if (badge) { badge.disabled = true; badge.textContent = 'Updating...'; }
+    try {
+      const res = await fetch('/api/update', { method: 'POST', headers: { 'X-Autowg-Action': 'update' } });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      this.showToast(`✓ Installed ${body.version}, restarting...`);
+      // Wait for the new process to answer, then reload the page
+      const started = Date.now();
+      const wait = async () => {
+        try {
+          const r = await fetch('/api/update', { cache: 'no-store' });
+          const j = await r.json().catch(() => ({}));
+          if (j.current && j.current !== info.current) { location.reload(); return; }
+        } catch (e) { /* still restarting */ }
+        if (Date.now() - started < 120000) setTimeout(wait, 2000);
+        else this.showToast('Auto-WG did not come back within 2 minutes; check the service', true);
+      };
+      setTimeout(wait, 3000);
+    } catch (err) {
+      this.showToast('Update failed: ' + err.message, true);
+      if (badge) { badge.disabled = false; badge.textContent = `Update to ${info.latest}`; }
+    }
+  }
+
   startStatusPolling() {
+    this.checkForUpdate();
     this.pollStatus();
     this.statusTimer = setInterval(() => this.pollStatus(), 2000);
 

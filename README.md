@@ -481,6 +481,24 @@ List them with `iptables -t nat -S PREROUTING | grep autowg-` (and `ip6tables`).
 
 ---
 
+## ⬆️ Updating from GitHub releases
+
+Releases are published by tagging the repository (`git tag v0.2.0 && git push origin v0.2.0`): a GitHub Actions workflow tests the code, builds `autowg_linux_amd64`, `autowg_linux_arm64` and `autowg_linux_arm` plus a `checksums.txt`, and creates the release.
+
+```bash
+autowg -version          # the running version ("dev" for a local build)
+autowg -check-update     # compare with the latest release
+sudo autowg -update      # install it over this binary and restart the systemd service
+```
+
+* The binary is only installed when its SHA-256 matches the `checksums.txt` of the same release, and it must start and report the release's version. If anything fails, the installed binary is left as it was.
+* `-update` restarts the `autowg` systemd service if it is running; add `-no-restart` to only replace the file. Without systemd, start the new binary yourself.
+* The web dashboard shows the version and an **Update to vX** button when a newer release exists. It installs the release the same way and restarts Auto-WG (the process re-executes the new binary after its normal cleanup, so tunnels drop and come back within seconds). Like the rest of the admin panel, protect it with `web.username`/`web.password` and `allowed_ips`.
+* Builds made without the release workflow report `dev` and count as older than any release.
+* The check uses the unauthenticated GitHub API (60 requests an hour per address; the dashboard caches answers for 10 minutes). Set `GITHUB_TOKEN` in the service's environment to raise the limit.
+
+---
+
 ## 🧪 Testing
 
 Run the full automated test suite:

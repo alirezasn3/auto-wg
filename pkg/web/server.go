@@ -33,6 +33,8 @@ type Server struct {
 	adminServer  *http.Server
 	statusServer *http.Server
 	statusTmpl   *template.Template
+	updater      *Updater
+	updateCache  checkCache
 }
 
 type PublicStatus struct {
@@ -108,6 +110,7 @@ func (s *Server) Start() error {
 		adminMux.HandleFunc("/api/actions/hunt", s.handleActionHunt)
 		adminMux.HandleFunc("/api/actions/rebind", s.handleActionRebind)
 		adminMux.HandleFunc("/api/actions/switch", s.handleActionSwitch)
+		adminMux.HandleFunc("/api/update", s.handleUpdate)
 		adminMux.Handle("/", http.FileServer(http.FS(subFS)))
 
 		handler := s.authMiddleware(adminMux)

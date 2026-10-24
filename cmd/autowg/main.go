@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -15,22 +17,39 @@ import (
 	"auto-wg/pkg/iptables"
 	"auto-wg/pkg/logger"
 	"auto-wg/pkg/supervisor"
+	"auto-wg/pkg/update"
 	"auto-wg/pkg/web"
 	"auto-wg/pkg/wg"
 
 	goSystemd "github.com/alirezasn3/go-systemd"
 )
 
+// version is set at build time (-ldflags "-X main.version=v1.2.3"); "dev" marks a local build.
+var version = "dev"
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "Path to YAML configuration file")
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
 	installFlag := flag.Bool("install", false, "Install Auto-WG as a systemd service and start it")
 	uninstallFlag := flag.Bool("uninstall", false, "Stop and uninstall the Auto-WG systemd service")
+	versionFlag := flag.Bool("version", false, "Print the version and exit")
+	checkUpdateFlag := flag.Bool("check-update", false, "Check GitHub for a newer release and exit")
+	updateFlag := flag.Bool("update", false, "Install the latest GitHub release over this binary (and restart the systemd service)")
+	noRestartFlag := flag.Bool("no-restart", false, "With -update: do not restart the systemd service afterwards")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("autowg %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
+		return
+	}
 
 	log := logger.Default()
 	if *debug {
 		log.SetMinLevel(logger.LevelDebug)
+	}
+
+	if *checkUpdateFlag || *updateFlag {
+		os.Exit(handleUpdate(*updateFlag, !*noRestartFlag, log))
 	}
 
 	if *installFlag {
@@ -95,10 +114,26 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// The running executable, resolved now: after an update replaces the file, /proc/self/exe no longer
+	// names it.
+	exePath, _ := resolveExe()
+
+	// An update from the dashboard asks for a restart, which re-executes the new binary after cleanup.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	var restartRequested atomic.Bool
+	requestRestart := func() {
+		restartRequested.Store(true)
+		sigChan <- syscall.SIGTERM
+	}
+
 	// Initialize Web Server(s) (Admin Panel and/or Public Status Page)
 	var webServer *web.Server
 	if cfg.Web.Enabled || cfg.StatusPage.Enabled {
 		webServer = web.NewServer(sup, log)
+		if exePath != "" {
+			webServer.SetUpdater(&web.Updater{Version: version, Exe: exePath, Restart: requestRestart})
+		}
 		if err := webServer.Start(); err != nil {
 			log.Warn("MAIN", "Failed to start web server(s): %v", err)
 		}
@@ -112,9 +147,6 @@ func main() {
 	}()
 
 	// Handle graceful shutdown on OS signals
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
 	sig := <-sigChan
 	log.Info("MAIN", "Received shutdown signal (%v). Gracefully stopping Auto-WG...", sig)
 
@@ -135,6 +167,76 @@ func main() {
 	}
 
 	fmt.Println("Auto-WG stopped cleanly.")
+
+	if restartRequested.Load() && exePath != "" {
+		log.Info("MAIN", "Restarting into the updated binary %s", exePath)
+		if err := syscall.Exec(exePath, os.Args, os.Environ()); err != nil {
+			log.Error("MAIN", "Could not start the updated binary: %v (start Auto-WG again manually)", err)
+			os.Exit(1)
+		}
+	}
+}
+
+func resolveExe() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(exe)
+}
+
+// handleUpdate implements -check-update and -update. It returns the process exit code.
+func handleUpdate(install, restart bool, log *logger.Logger) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	info, rel, err := update.Check(ctx, version)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Update check failed: %v\n", err)
+		return 1
+	}
+	fmt.Printf("Running %s, latest release %s (%s)\n", info.Current, info.Latest, info.URL)
+	if !info.Available {
+		fmt.Println("Already up to date.")
+		return 0
+	}
+	if !install {
+		fmt.Printf("Update available. Run `autowg -update` to install it.\n")
+		return 0
+	}
+
+	exe, err := resolveExe()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Cannot locate this executable: %v\n", err)
+		return 1
+	}
+	fmt.Printf("Downloading %s and verifying its checksum...\n", info.Asset)
+	if err := update.Install(ctx, rel, exe); err != nil {
+		fmt.Fprintf(os.Stderr, "Update failed (the installed binary was not changed): %v\n", err)
+		return 1
+	}
+	fmt.Printf("Installed %s at %s\n", rel.Tag, exe)
+
+	if !restart {
+		fmt.Println("Restart the service to run it: sudo systemctl restart autowg")
+		return 0
+	}
+	st, err := goSystemd.StatusService("autowg")
+	if err != nil || !st.Exists || !st.Active {
+		fmt.Println("The autowg systemd service is not running here; start the new binary yourself.")
+		return 0
+	}
+	fmt.Println("Restarting the autowg systemd service...")
+	if err := goSystemd.StopService("autowg"); err != nil {
+		fmt.Fprintf(os.Stderr, "Could not stop the service: %v\nRestart it manually: sudo systemctl restart autowg\n", err)
+		return 1
+	}
+	if err := goSystemd.StartService("autowg"); err != nil {
+		fmt.Fprintf(os.Stderr, "Could not start the service: %v\nStart it manually: sudo systemctl start autowg\n", err)
+		return 1
+	}
+	fmt.Println("Done.")
+	return 0
 }
 
 func handleInstall(configPath string, log *logger.Logger) {
