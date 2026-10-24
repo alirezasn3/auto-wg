@@ -404,6 +404,10 @@ class AutoWGApp {
     this.wgInterface.textContent = (data.interface || 'wg0') + (data.backend === 'amneziawg' ? ' · AmneziaWG' : '');
     this.localPort.textContent = data.local_port > 0 ? `:${data.local_port}` : '--';
     this.localPortRange.textContent = data.local_port_range || '--';
+    // On tls/ssh the ranges are the link's TCP ranges; WireGuard keeps the ListenPort from its own config
+    const linkedTransport = data.transport === 'tls' || data.transport === 'ssh';
+    const localLabel = document.getElementById('localPortLabel');
+    if (localLabel) localLabel.textContent = linkedTransport ? 'WireGuard port (not hunted) · link TCP range' : 'ListenPort · range';
 
     // 3. Center Bridge
     this.updateLiveHandshakeAge();
@@ -453,6 +457,8 @@ class AutoWGApp {
     }
     this.remotePort.textContent = data.remote_port > 0 ? `:${data.remote_port}` : '--';
     this.remotePortRange.textContent = data.remote_port_range || '--';
+    const remoteLabel = document.getElementById('remotePortLabel');
+    if (remoteLabel) remoteLabel.textContent = (data.transport === 'tls' || data.transport === 'ssh') ? 'Link dials TCP range' : 'Endpoint port · range';
 
     // 5. Telemetry Cards
     if (data.hunting === false) {

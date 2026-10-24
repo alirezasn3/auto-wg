@@ -157,10 +157,19 @@ func (h *Hunter) planLinkLocked() linkAction {
 	}
 	now := h.now()
 	every := h.reconnectAfter()
-	if now.Sub(h.deadSince) < every || (!h.lastLinkReset.IsZero() && now.Sub(h.lastLinkReset) < every) {
+	connected := h.tun.Connected()
+	// WireGuard can only answer once there is a link, so a connection gets its full window from the moment
+	// it came up, not from when WireGuard first looked dead.
+	since := h.deadSince
+	if connected {
+		if up := h.tun.Status().Since; up.After(since) {
+			since = up
+		}
+	}
+	if now.Sub(since) < every || (!h.lastLinkReset.IsZero() && now.Sub(h.lastLinkReset) < every) {
 		return linkStay
 	}
-	if h.tun.Connected() {
+	if connected {
 		return linkReset
 	}
 	return linkRotate

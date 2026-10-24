@@ -259,6 +259,31 @@ func TestDeadWireGuardOnHealthyLinkRebuildsTheConnectionPeriodically(t *testing.
 	}
 }
 
+// The dead timer starts when WireGuard first looks dead, possibly long before the link comes up; a fresh
+// connection must still get its whole reconnect_after to let WireGuard handshake.
+func TestFreshConnectionGetsItsFullWindow(t *testing.T) {
+	r := newLinkRig(t, config.TransportTLS)
+	r.tun.set(false, 0)
+	r.tick() // dead timer starts, no link yet
+	r.advance(30 * time.Second)
+	r.tick() // no connection for long: the listener rotates
+	rotations := r.tun.reconnectCount()
+	r.advance(20 * time.Second) // long enough that the rotation no longer holds the next action back
+
+	r.tun.statusExtra = transport.Status{Since: r.now}
+	r.tun.set(true, 0) // the link comes up just now
+	r.advance(4 * time.Second)
+	r.tick()
+	if r.tun.resetCount() != 0 {
+		t.Fatal("a connection that just came up must not be dropped for WireGuard having been dead before it existed")
+	}
+	r.advance(7 * time.Second) // 11s since the link came up
+	r.tick()
+	if r.tun.resetCount() != 1 {
+		t.Fatalf("expected the reset once the connection had its full window, got %d (rotations before: %d)", r.tun.resetCount(), rotations)
+	}
+}
+
 func TestDeadWireGuardWithoutConnectionRotatesTheListener(t *testing.T) {
 	r := newLinkRig(t, config.TransportSSH)
 	r.tun.set(false, 30*time.Second)
