@@ -319,16 +319,6 @@
       color: var(--text-main);
     }
 
-    .service-badge-active {
-      font-size: 10.5px;
-      font-weight: 700;
-      color: var(--success);
-      background: rgba(1, 122, 71, 0.22);
-      border: 1px solid rgba(1, 122, 71, 0.5);
-      padding: 2px 7px;
-      border-radius: 10px;
-    }
-
     .service-right {
       display: flex;
       align-items: center;
@@ -629,7 +619,6 @@
           none: 'None',
           noOutages: 'No outages recorded',
           servicesTitle: 'Managed Tunnels & Services',
-          activeRoute: 'Active Route',
           tunnelStatusCount: count => `${count} tunnel${count === 1 ? '' : 's'}`,
           historyTitle: 'Recent Interruption & Recovery History',
           noEvents: 'No interruptions recorded yet. Service is 100% operational.',
@@ -658,7 +647,6 @@
           none: 'بدون اختلال',
           noOutages: 'هیچ قطعی ثبت نشده است',
           servicesTitle: 'سرویس‌ها و تونل‌های فعال',
-          activeRoute: 'مسیر فعال',
           tunnelStatusCount: count => `${toPersianDigits(count)} تونل`,
           historyTitle: 'تاریخچه اختلالات و بازیابی‌های اخیر',
           noEvents: 'تاکنون هیچ اختلالی ثبت نشده است. سرویس با پایداری ۱۰۰٪ فعال است.',
@@ -860,13 +848,11 @@
             const dotClass = isConn ? 'connected' : 'disconnected';
             const pctStr = tn.uptime_percent !== undefined ? tn.uptime_percent.toFixed(2) : '100.00';
             const formattedPct = currentLang === 'fa' ? `${toPersianDigits(pctStr)}٪` : `${pctStr}%`;
-            const activeBadge = tn.is_active_route ? `<span class="service-badge-active">${t.activeRoute}</span>` : '';
             sHtml += `
               <div class="service-row">
                 <div class="service-left">
                   <span class="event-dot ${dotClass}"></span>
                   <span class="service-name">${escapeHtml(tn.name || tn.interface)}</span>
-                  ${activeBadge}
                 </div>
                 <div class="service-right">
                   <span class="service-uptime">${escapeHtml(tn.uptime_formatted || '')}</span>

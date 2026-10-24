@@ -1,11 +1,12 @@
 # ==============================================================================
-# Auto-WG Client Configuration (Upstream Failover & Routing Table 200)
+# Auto-WG Client Configuration (Upstream Tunnels & Policy Routing Hooks)
 # ==============================================================================
 # NOTE: Your /etc/wireguard/wgBridge*.conf interface files do NOT need "ListenPort" or "Endpoint".
 # Auto-WG automatically assigns a listen port from "port_range" and initializes the
 # peer's remote endpoint from "target_ips" and "remote_port_range" on startup!
 
-# Operation mode: "client" (one of multiple upstream connections is chosen based on availability)
+# Operation mode: "client" (connects out to upstream servers). Auto-WG keeps the tunnels alive;
+# which one carries traffic is up to the routing rules below.
 mode: "client"
 
 # Shell commands executed when Auto-WG starts (PostUp)
@@ -25,13 +26,6 @@ pre_down:
   - "ip rule del from 10.0.0.0/16 lookup 200 priority 200"
   - "ip rule del to 10.0.0.1 lookup local priority 100"
   - "ip rule del to 192.168.69.0/24 lookup 200 priority 201"
-
-# Automatic route management
-routing:
-  enabled: true             # Automatically manage default route failover
-  table: 200                # Target routing table (e.g. 200, leaves host main table and SSH untouched)
-  mode: "sticky"            # "sticky" (stay on active until it fails, avoiding flaps) or "priority" (prefer first tunnel)
-  metric: 100               # Default route metric
 
 # Upstream tunnels to foreign servers
 tunnels:

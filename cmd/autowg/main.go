@@ -139,7 +139,7 @@ func main() {
 		}
 	}
 
-	// Start Supervisor in background (manages hunters, PostUp/PreDown, and routing failover)
+	// Start Supervisor in background (manages hunters and PostUp/PreDown)
 	supDone := make(chan struct{})
 	go func() {
 		defer close(supDone)

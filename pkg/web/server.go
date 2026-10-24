@@ -40,7 +40,6 @@ type Server struct {
 type PublicStatus struct {
 	Title                 string               `json:"title"`
 	Mode                  string               `json:"mode"`
-	ActiveTunnel          string               `json:"active_tunnel,omitempty"`
 	Connected             bool                 `json:"connected"`
 	State                 string               `json:"state"`
 	StatusMessage         string               `json:"status_message"`
@@ -67,7 +66,6 @@ type PublicTunnelStatus struct {
 	State           string  `json:"state"`
 	UptimeFormatted string  `json:"uptime_formatted"`
 	UptimePercent   float64 `json:"uptime_percent"`
-	IsActiveRoute   bool    `json:"is_active_route"`
 }
 
 type PublicEvent struct {
@@ -109,7 +107,6 @@ func (s *Server) Start() error {
 		adminMux.HandleFunc("/api/logs/stream", s.handleLogStream)
 		adminMux.HandleFunc("/api/actions/hunt", s.handleActionHunt)
 		adminMux.HandleFunc("/api/actions/rebind", s.handleActionRebind)
-		adminMux.HandleFunc("/api/actions/switch", s.handleActionSwitch)
 		adminMux.HandleFunc("/api/update", s.handleUpdate)
 		adminMux.Handle("/", http.FileServer(http.FS(subFS)))
 
@@ -526,31 +523,6 @@ func (s *Server) handleActionRebind(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleActionSwitch(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	tunnel := r.URL.Query().Get("tunnel")
-	if tunnel == "" {
-		http.Error(w, "missing ?tunnel parameter", http.StatusBadRequest)
-		return
-	}
-
-	if err := s.sup.SwitchActiveTunnel(tunnel); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":        "ok",
-		"message":       "active route switched",
-		"active_tunnel": tunnel,
-	})
-}
-
 func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
 	pub := s.getPublicStatus()
 
@@ -605,8 +577,6 @@ func (s *Server) getPublicStatus() PublicStatus {
 		}
 		pct := math.Round(uptimeRatio*10000) / 100
 
-		isActive := (supStatus.Mode == "client" && supStatus.ActiveTunnel == iface)
-
 		tunnelList = append(tunnelList, PublicTunnelStatus{
 			Interface:       iface,
 			Name:            st.Name,
@@ -614,7 +584,6 @@ func (s *Server) getPublicStatus() PublicStatus {
 			State:           st.State,
 			UptimeFormatted: formatDurationHuman(uptimeSec),
 			UptimePercent:   pct,
-			IsActiveRoute:   isActive,
 		})
 
 		for _, evt := range st.Events {
@@ -647,9 +616,6 @@ func (s *Server) getPublicStatus() PublicStatus {
 		if mainReport.Interface == "" {
 			mainReport = st
 		}
-		if supStatus.Mode == "client" && supStatus.ActiveTunnel == iface {
-			mainReport = st
-		}
 	}
 
 	// Sort events newest first and limit to 50
@@ -667,19 +633,18 @@ func (s *Server) getPublicStatus() PublicStatus {
 	overallState := "OPERATIONAL"
 
 	if supStatus.Mode == "client" {
-		if supStatus.ActiveTunnel != "" {
-			activeReport := supStatus.Tunnels[supStatus.ActiveTunnel]
-			overallConnected = activeReport.State == hunter.StateConnected
-			if overallConnected {
-				statusMsg = fmt.Sprintf("Operational (Active: %s)", activeReport.Name)
-				statusDesc = fmt.Sprintf("Routing through %s. Backup links monitored in background.", activeReport.Name)
-				overallState = "OPERATIONAL"
-			} else {
-				statusMsg = "Upstream Interrupted"
-				statusDesc = "Active upstream link is down; searching for available link."
-				overallState = "DEGRADED"
-			}
-		} else {
+		switch {
+		case connectedCount == totalTunnels && totalTunnels > 0:
+			overallConnected = true
+			statusMsg = "Operational"
+			statusDesc = fmt.Sprintf("All %d upstream tunnels are connected.", totalTunnels)
+			overallState = "OPERATIONAL"
+		case connectedCount > 0:
+			overallConnected = true
+			statusMsg = "Partially Operational"
+			statusDesc = fmt.Sprintf("%d of %d upstream tunnels are connected.", connectedCount, totalTunnels)
+			overallState = "DEGRADED"
+		default:
 			statusMsg = "No Upstream Connected"
 			statusDesc = "Searching for available upstream tunnels."
 			overallState = "DOWN"
@@ -740,7 +705,6 @@ func (s *Server) getPublicStatus() PublicStatus {
 	pub := PublicStatus{
 		Title:                 title,
 		Mode:                  supStatus.Mode,
-		ActiveTunnel:          supStatus.ActiveTunnel,
 		Connected:             overallConnected,
 		State:                 overallState,
 		StatusMessage:         statusMsg,

@@ -176,8 +176,6 @@ button { font: inherit; color: inherit; cursor: pointer; }
 /* ---------- Tunnel switcher ---------- */
 .switcher-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
 .switcher-left { display: flex; align-items: center; gap: 10px; }
-.switcher-active-route { font-size: 12px; color: var(--text-main); font-weight: 600; }
-.tunnel-header-actions { display: flex; gap: 8px; }
 .tunnel-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .tunnel-tab-btn {
   display: inline-flex;
@@ -198,7 +196,6 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .dot-stalled { background: var(--warning); }
 .dot-hunting { background: var(--blue); animation: pulse 1.4s ease-in-out infinite; }
 .dot-unknown { background: var(--text-dim); }
-.tab-badge-route { font-size: 11px; color: var(--text-muted); font-weight: 600; }
 
 /* ---------- Hero ---------- */
 .hero-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
@@ -350,7 +347,6 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .form-textarea { resize: vertical; font-family: var(--font-mono); font-size: 12px; }
 .form-grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
 .form-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-.routing-fields { display: flex; flex-direction: column; gap: 12px; }
 
 .switch-label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; font-weight: 400; color: var(--text-main); }
 .switch-label input { position: absolute; opacity: 0; pointer-events: none; }

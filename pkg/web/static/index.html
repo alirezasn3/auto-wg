@@ -28,14 +28,12 @@
 
     <!-- DASHBOARD -->
     <main id="tab-dashboard" class="tab-content active">
-      <!-- Tunnel switcher (shown with 2+ tunnels or in routing mode) -->
+      <!-- Tunnel switcher (shown with 2+ tunnels) -->
       <section class="switcher" id="tunnelSwitcherCard" style="display: none;">
         <div class="switcher-head">
           <div class="switcher-left">
             <span class="section-tag" id="switcherModeTag">TUNNELS</span>
-            <span class="switcher-active-route" id="switcherActiveRouteBadge" style="display: none;"></span>
           </div>
-          <div class="tunnel-header-actions" id="tunnelHeaderActions"></div>
         </div>
         <div class="tunnel-tabs" id="tunnelTabs"></div>
       </section>
@@ -216,32 +214,7 @@
                   <span>Server</span>
                 </label>
               </div>
-              <span class="form-hint">Client manages upstream failover and policy routing; server accepts connections from clients.</span>
-            </div>
-
-            <div id="routingFieldsSection" class="routing-fields">
-              <label class="switch-label">
-                <input type="checkbox" id="cfgRoutingEnabled" checked>
-                <span class="switch-slider"></span>
-                <span class="switch-text">Route failover</span>
-              </label>
-              <div class="form-grid-3">
-                <div class="form-group">
-                  <label class="form-label" for="cfgRoutingTable">Routing table</label>
-                  <input type="number" id="cfgRoutingTable" class="form-input" value="200" placeholder="200">
-                </div>
-                <div class="form-group">
-                  <label class="form-label" for="cfgRoutingMode">Failover mode</label>
-                  <select id="cfgRoutingMode" class="form-input">
-                    <option value="priority">Priority</option>
-                    <option value="sticky">Sticky</option>
-                  </select>
-                </div>
-                <div class="form-group">
-                  <label class="form-label" for="cfgRoutingMetric">Route metric</label>
-                  <input type="number" id="cfgRoutingMetric" class="form-input" value="100" placeholder="100">
-                </div>
-              </div>
+              <span class="form-hint">Client connects out to upstream servers; server accepts connections from clients. This only changes how the status page words things.</span>
             </div>
           </section>
 
@@ -347,14 +320,6 @@ remote_port_range: "443-8443"
 tls:
   secret: "&lt;same on both peers&gt;"
   padding: bucket</code></pre>
-          </div>
-          <div class="help-box">
-            <h4>Policy routing failover</h4>
-            <p>Keeps <code>ip route replace default dev wgX table 200</code> pointed at the healthy tunnel.</p>
-            <pre><code>routing:
-  enabled: true
-  table: 200
-  mode: "priority"</code></pre>
           </div>
           <div class="help-box">
             <h4>In-tunnel ping</h4>

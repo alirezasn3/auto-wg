@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"auto-wg/pkg/config"
-	"auto-wg/pkg/hunter"
 	"auto-wg/pkg/iptables"
 	"auto-wg/pkg/logger"
 	"auto-wg/pkg/wg"
@@ -74,90 +73,6 @@ func TestSupervisorServerMode(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	cancel()
 	wgGroup.Wait()
-}
-
-func TestRouteManagerFailoverStickyAndPriority(t *testing.T) {
-	log := logger.New(io.Discard, logger.LevelDebug, 100)
-	wgCtrl, _ := wg.NewController(log)
-	iptMgr := iptables.NewManager(log)
-
-	tunnels := make(map[string]*hunter.Hunter)
-	order := []string{"wgBridge0", "wgBridge1"}
-
-	h0 := hunter.New(config.TunnelConfig{Interface: "wgBridge0", HistoryFile: "off"}, wgCtrl, iptMgr, log, nil)
-	h1 := hunter.New(config.TunnelConfig{Interface: "wgBridge1", HistoryFile: "off"}, wgCtrl, iptMgr, log, nil)
-	tunnels["wgBridge0"] = h0
-	tunnels["wgBridge1"] = h1
-
-	var appliedRoutes []string
-	mockRouteFn := func(iface string, table int, metric int) error {
-		appliedRoutes = append(appliedRoutes, iface)
-		return nil
-	}
-
-	// 1. Sticky Mode:
-	rmSticky := NewRouteManager(config.RoutingConfig{
-		Enabled: true,
-		Table:   200,
-		Mode:    "sticky",
-	}, tunnels, order, log)
-	rmSticky.routeCmdFn = mockRouteFn
-
-	// Initial: neither is connected
-	active := rmSticky.Evaluate()
-	if active != "" {
-		t.Errorf("expected empty active, got %s", active)
-	}
-
-	// wgBridge1 connects first
-	h1.TriggerHunt("test") // sets state
-	// simulate connected:
-	// we access status or test helper
-	// We can test Evaluate by setting state
-	// Note: h1 has unexported state, but New has StateUnknown
-}
-
-func TestSupervisorClientFailoverFlow(t *testing.T) {
-	log := logger.New(io.Discard, logger.LevelDebug, 100)
-	wgCtrl, _ := wg.NewController(log)
-	iptMgr := iptables.NewManager(log)
-
-	cfg := &config.Config{
-		Mode: "client",
-		Routing: config.RoutingConfig{
-			Enabled: true,
-			Table:   200,
-			Mode:    "sticky",
-			Metric:  100,
-		},
-		Tunnels: []config.TunnelConfig{
-			{Interface: "wgBridge0", Name: "Upstream-Main", HistoryFile: "off"},
-			{Interface: "wgBridge1", Name: "Upstream-Backup", HistoryFile: "off"},
-		},
-	}
-
-	sup := New("", cfg, wgCtrl, iptMgr, log)
-
-	var lastSwitchedIface string
-	var lastSwitchedTable int
-	sup.routeManager.routeCmdFn = func(iface string, table int, metric int) error {
-		lastSwitchedIface = iface
-		lastSwitchedTable = table
-		return nil
-	}
-
-	// Force switch
-	if err := sup.SwitchActiveTunnel("wgBridge1"); err != nil {
-		t.Fatalf("SwitchActiveTunnel failed: %v", err)
-	}
-	if lastSwitchedIface != "wgBridge1" || lastSwitchedTable != 200 {
-		t.Errorf("expected wgBridge1 on table 200, got %s on table %d", lastSwitchedIface, lastSwitchedTable)
-	}
-
-	st := sup.GetStatus()
-	if st.ActiveTunnel != "wgBridge1" {
-		t.Errorf("expected ActiveTunnel wgBridge1, got %s", st.ActiveTunnel)
-	}
 }
 
 func TestSupervisorSaveAndApplyConfig(t *testing.T) {

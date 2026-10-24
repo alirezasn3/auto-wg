@@ -2,11 +2,11 @@
 
 Auto-WG is a high-performance Go application designed to keep WireGuard connections alive in hostile network environments with Deep Packet Inspection (DPI), stateful flow blocking, and asymmetric reachability.
 
-By combining **autonomous symmetrical hunting**, **kernel-level `iptables` port-range forwarding**, and **dynamic policy routing failover**, Auto-WG allows WireGuard peers to dynamically rotate connection 5-tuples and self-heal stalled links **without needing any external server, Cloudflare Worker, or out-of-band negotiator**.
+By combining **autonomous symmetrical hunting**, and **kernel-level `iptables` port-range forwarding**, Auto-WG allows WireGuard peers to dynamically rotate connection 5-tuples and self-heal stalled links **without needing any external server, Cloudflare Worker, or out-of-band negotiator**.
 
 Auto-WG natively supports two primary deployment topologies:
 1. **Server Mode (`mode: "server"`)**: A server that maintains resilient connections to one or more clients across independent WireGuard interfaces.
-2. **Client Mode (`mode: "client"`)**: A client that has one or more upstream connections and dynamically switches the active route to an available tunnel based on real-time link health.
+2. **Client Mode (`mode: "client"`)**: A client that connects out to one or more upstream servers. Auto-WG keeps each upstream tunnel alive; routing traffic over them is left to your own `post_up` rules and routes.
 
 ---
 
@@ -17,13 +17,12 @@ Auto-WG natively supports two primary deployment topologies:
 * **AmneziaWG Support**: Each tunnel can run on stock WireGuard (default) or on [AmneziaWG](https://github.com/amnezia-vpn/amneziawg-go) (`backend: "amneziawg"`), whose junk packets, padded handshakes and custom headers defeat DPI that fingerprints the 148/92-byte WireGuard handshake. Stock and AmneziaWG tunnels can be mixed. See [AmneziaWG](#-amneziawg).
 * **Three transports per interface**: `direct` (plain UDP with port hunting), `tls` (WireGuard packets inside a TLS 1.3 connection) and `ssh` (inside a genuine OpenSSH session, using the real `ssh` client and the peer's real `sshd`). Both TCP transports use port ranges like the UDP one, health-check the connection and can pad packet sizes. You create one interface per transport and switch between them yourself. Works with stock WireGuard and AmneziaWG. See [WireGuard over TLS or SSH](#-wireguard-over-tls-or-ssh).
 * **Multi-Interface Architecture**: Supervise multiple tunnels simultaneously on a single machine, with isolated port ranges, independent health probes, and per-tunnel persistent state.
-* **Upstream Route Failover (Policy Routing / Table 200)**: In client mode, Auto-WG monitors upstream health and dynamically updates default routes in a designated routing table (e.g. `table 200`) using `ip route replace default dev <iface> table 200`. The host's main routing table and SSH sessions are never disrupted.
-* **PostUp & PreDown Lifecycle Hooks**: Execute custom shell commands (policy routing rules, iptables MASQUERADE, UFW forwardings) automatically upon daemon start and shutdown.
+* **PostUp & PreDown Lifecycle Hooks**: Execute custom shell commands (routing rules, iptables MASQUERADE, UFW forwardings) automatically upon daemon start and shutdown.
 * **Kernel Port Forwarding (`go-iptables`)**: Automatically forwards disjoint UDP port ranges (e.g., `20000–24999`, `25000–29999`) directly to each WireGuard interface's listening port using `iptables -t nat -A PREROUTING -j REDIRECT`. Linux `conntrack` handles reverse translation.
 * **Automatic Peer Discovery**: Auto-WG queries each WireGuard interface and automatically extracts the single peer's public key, current endpoint, and handshake statistics directly from the kernel.
 * **Deterministic Anti-Collision Staggering**: Uses public key lexicographical comparison (`localPubKey < peerPubKey`) to coordinate turn-taking windows (e.g. 8s cycle) so peers do not collide or flap while hunting.
 * **Multi-Destination Dual-Stack Hunting (`target_ips`)**: Tunnels can specify multiple candidate destination endpoints (IPv4 & IPv6, or domain hostnames). If DPI blocks or throttles one address family, Auto-WG automatically round-robins between IPv4 and IPv6 during port hunting to punch through hostile firewalls.
-* **Integrated Web Dashboard & Public Status Page**: Modern, mobile-responsive web UI with multi-tunnel telemetry, active route indication, manual hunt/rebind triggers, live SSE logs, and an isolated bilingual (Persian & English) public status page.
+* **Integrated Web Dashboard & Public Status Page**: Modern, mobile-responsive web UI with multi-tunnel telemetry, manual hunt/rebind triggers, live SSE logs, and an isolated bilingual (Persian & English) public status page.
 
 ---
 
@@ -50,30 +49,9 @@ In Server Mode, Auto-WG supervises multiple client interfaces on the server. Eac
                             └────────────┘ └────────────┘
 ```
 
-### 2. Client Mode (Upstream Failover & Policy Routing)
+### 2. Client Mode (Upstream Tunnels)
 
-In Client Mode, the machine maintains one or more upstream tunnels (e.g., `wgBridge0`, `wgBridge1`) to foreign servers. Auto-WG continuously monitors the health of each upstream link using handshake age and in-tunnel ICMP ping probes. When the active upstream drops, Auto-WG automatically updates the default route in policy routing table 200:
-
-```
-                            ┌────────────────────────┐
-                            │    Incoming Traffic    │
-                            │ (e.g. user VPN wgServer)
-                            └───────────┬────────────┘
-                                        │ (lookup table 200)
-                                        ▼
-                     ┌──────────────────────────────────────┐
-                     │            Auto-WG Client            │
-                     │                                      │
-                     │  Active Route: dev wgBridge0 table 200│
-                     │  Backup Route: dev wgBridge1         │
-                     └──────────┬─────────────────┬─────────┘
-                                │ (Healthy)       │ (Standby / Hunting)
-                                ▼                 ▼
-                         ┌─────────────┐   ┌─────────────┐
-                         │ Upstream A  │   │ Upstream B  │
-                         │ (Foreign 1) │   │ (Foreign 2) │
-                         └─────────────┘   └─────────────┘
-```
+In Client Mode, the machine maintains one or more upstream tunnels (e.g., `wgBridge0`, `wgBridge1`) to foreign servers. Auto-WG monitors each upstream link using handshake age and in-tunnel ICMP ping probes and hunts new ports (or rebuilds the TLS/SSH link) when one stalls. It does not change routes: which tunnel carries traffic is decided by your `post_up` rules (`ip rule`, `ip route`, firewall) or by routing daemons.
 
 ---
 
@@ -103,12 +81,12 @@ cp configs/server.example.yaml config.yaml
 cp configs/client.example.yaml config.yaml
 ```
 
-#### Client Configuration Example with Policy Routing (`table 200`):
+#### Client Configuration Example:
 
 ```yaml
 mode: "client"
 
-# Lifecycle hooks: setup policy routing, NAT MASQUERADE, and firewall rules
+# Lifecycle hooks: set up your routing rules, NAT MASQUERADE, and firewall rules
 post_up:
   - "ip rule add to 10.0.0.1 lookup local priority 100"
   - "ip rule add from 10.0.0.0/16 lookup 200 priority 200"
@@ -123,12 +101,6 @@ pre_down:
   - "ip rule del from 10.0.0.0/16 lookup 200 priority 200"
   - "ip rule del to 10.0.0.1 lookup local priority 100"
   - "ip rule del to 192.168.69.0/24 lookup 200 priority 201"
-
-routing:
-  enabled: true
-  table: 200       # Updates 'ip route replace default dev <iface> table 200'
-  mode: "sticky"   # "sticky" (avoids flapping) or "priority" (prefers first configured tunnel)
-  metric: 100
 
 tunnels:
   - interface: "wgBridge0"
@@ -201,7 +173,6 @@ sudo ./autowg --uninstall
 
 - **Admin Dashboard**: `http://<ip>:8080` (or `127.0.0.1:8080`)
   - Real-time connection health across all supervised tunnels.
-  - Active upstream route indication and manual switch overrides.
   - Manual port rebind and hunt triggers.
   - Live streaming logs via Server-Sent Events (SSE).
 - **Public Status Page**: `http://<ip>:8081`
@@ -216,18 +187,9 @@ sudo ./autowg --uninstall
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `mode` | string | `server` | Operating mode: `"server"` (multi-client) or `"client"` (upstream failover) |
+| `mode` | string | `server` | Operating mode: `"server"` (multi-client) or `"client"` (upstream tunnels); only changes how the status page words things |
 | `post_up` | list of string | `[]` | Shell commands executed sequentially after tunnels initialize |
 | `pre_down` | list of string | `[]` | Shell commands executed sequentially before daemon exits |
-
-### `routing` (Client Mode Failover)
-
-| Field | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `routing.enabled` | bool | `false` | Enable automatic default route switching when links fail |
-| `routing.table` | int | `0` | Linux routing table ID (e.g. `200` for policy routing, `0` for main) |
-| `routing.mode` | string | `sticky` | `"sticky"` (maintains current tunnel until it drops) or `"priority"` (prefers top tunnel) |
-| `routing.metric` | int | `100` | Metric value applied to the kernel route |
 
 ### `tunnels[]` (Per-Tunnel Configuration)
 
@@ -295,7 +257,7 @@ sudo ./autowg --uninstall
 
 WireGuard's handshake messages are authenticated, so DPI that fingerprints them (the 148-byte initiation, the 92-byte response and their `01 00 00 00` / `02 00 00 00` headers) cannot be fooled from outside the tunnel. [AmneziaWG](https://github.com/amnezia-vpn/amneziawg-go) changes the wire format itself: junk packets before the handshake, random padding on every message type, custom message headers, protocol-imitating signature packets and, since 3.0, encrypted headers and padded content.
 
-Set the backend per tunnel; everything else (port hunting, failover, ping, the dashboard) works the same:
+Set the backend per tunnel; everything else (port hunting, ping, the dashboard) works the same:
 
 ```yaml
 tunnels:
@@ -390,7 +352,7 @@ If Auto-WG does start first it keeps retrying until the interface appears, but i
 
 ## 🔐 WireGuard over TLS or SSH
 
-When DPI blocks WireGuard itself, an interface can carry its packets inside a TCP connection instead. Each interface has **one** transport, chosen by `transport:`; Auto-WG does not switch between transports. To have direct, TLS and SSH available, create three WireGuard interfaces (same keys are fine, different listen ports and addresses) and three `tunnels[]` entries, and decide yourself which one carries traffic, for example with the routing manager or your own routes.
+When DPI blocks WireGuard itself, an interface can carry its packets inside a TCP connection instead. Each interface has **one** transport, chosen by `transport:`; Auto-WG does not switch between transports. To have direct, TLS and SSH available, create three WireGuard interfaces (same keys are fine, different listen ports and addresses) and three `tunnels[]` entries, and decide yourself which one carries traffic with your own routes.
 
 ```yaml
 tunnels:

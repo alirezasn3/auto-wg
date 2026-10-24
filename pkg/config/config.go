@@ -18,17 +18,9 @@ type Config struct {
 	Mode       string           `yaml:"mode" json:"mode"` // "server" or "client" (default: "server")
 	PostUp     []string         `yaml:"post_up" json:"post_up"`
 	PreDown    []string         `yaml:"pre_down" json:"pre_down"`
-	Routing    RoutingConfig    `yaml:"routing" json:"routing"`
 	Tunnels    []TunnelConfig   `yaml:"tunnels" json:"tunnels"`
 	Web        WebConfig        `yaml:"web" json:"web"`
 	StatusPage StatusPageConfig `yaml:"status_page" json:"status_page"`
-}
-
-type RoutingConfig struct {
-	Enabled bool   `yaml:"enabled" json:"enabled"` // Enable automatic default route switching (in client mode)
-	Table   int    `yaml:"table" json:"table"`     // Linux routing table to manage (e.g. 200, or 0 for main table)
-	Mode    string `yaml:"mode" json:"mode"`       // "sticky" (avoid flapping) or "priority" (prefer first tunnel)
-	Metric  int    `yaml:"metric" json:"metric"`   // Default route metric (default: 100)
 }
 
 // WireGuard implementations a tunnel interface can run on.
@@ -184,15 +176,6 @@ func SetDefaults(cfg *Config) {
 	cfg.Mode = strings.ToLower(cfg.Mode)
 	if cfg.Mode != "client" {
 		cfg.Mode = "server"
-	}
-
-	if cfg.Mode == "client" {
-		if cfg.Routing.Mode == "" {
-			cfg.Routing.Mode = "sticky"
-		}
-		if cfg.Routing.Metric <= 0 {
-			cfg.Routing.Metric = 100
-		}
 	}
 
 	for i := range cfg.Tunnels {

@@ -40,14 +40,9 @@ class AutoWGApp {
     this.configRawContainer = document.getElementById('configRawContainer');
     this.activeConfigView = 'form'; // 'form' or 'yaml'
 
-    // Form Controls: Mode & Routing
+    // Form Controls: Mode
     this.cfgModeClient = document.getElementById('cfgModeClient');
     this.cfgModeServer = document.getElementById('cfgModeServer');
-    this.routingFieldsSection = document.getElementById('routingFieldsSection');
-    this.cfgRoutingEnabled = document.getElementById('cfgRoutingEnabled');
-    this.cfgRoutingTable = document.getElementById('cfgRoutingTable');
-    this.cfgRoutingMode = document.getElementById('cfgRoutingMode');
-    this.cfgRoutingMetric = document.getElementById('cfgRoutingMetric');
 
     // Form Controls: Managed Tunnels
     this.tunnelCardsContainer = document.getElementById('tunnelCardsContainer');
@@ -75,8 +70,6 @@ class AutoWGApp {
     this.tunnelSwitcherCard = document.getElementById('tunnelSwitcherCard');
     this.tunnelTabs = document.getElementById('tunnelTabs');
     this.switcherModeTag = document.getElementById('switcherModeTag');
-    this.switcherActiveRouteBadge = document.getElementById('switcherActiveRouteBadge');
-    this.tunnelHeaderActions = document.getElementById('tunnelHeaderActions');
     this.selectedTunnel = null;
 
     // Header & Clock
@@ -623,10 +616,8 @@ class AutoWGApp {
     const order = fullData.tunnel_order || (tunnels ? Object.keys(tunnels) : []);
 
     if (!order || order.length <= 1) {
-      if (!fullData.active_tunnel) {
-        this.tunnelSwitcherCard.style.display = 'none';
-        return;
-      }
+      this.tunnelSwitcherCard.style.display = 'none';
+      return;
     }
 
     this.tunnelSwitcherCard.style.display = 'block';
@@ -635,47 +626,9 @@ class AutoWGApp {
       this.switcherModeTag.textContent = `MODE: ${(fullData.mode || 'GATEWAY').toUpperCase()}`;
     }
 
-    if (this.switcherActiveRouteBadge) {
-      if (fullData.active_tunnel) {
-        this.switcherActiveRouteBadge.style.display = 'inline-block';
-        this.switcherActiveRouteBadge.textContent = `★ Active Route: ${fullData.active_tunnel}`;
-      } else {
-        this.switcherActiveRouteBadge.style.display = 'none';
-      }
-    }
-
     // Default selectedTunnel if unset
     if (!this.selectedTunnel || (tunnels && !tunnels[this.selectedTunnel])) {
-      this.selectedTunnel = fullData.active_tunnel || (order.length > 0 ? order[0] : null);
-    }
-
-    // Header actions: Switch route button if in client mode and looking at non-active tunnel
-    if (this.tunnelHeaderActions) {
-      this.tunnelHeaderActions.innerHTML = '';
-      if (fullData.mode === 'client' && fullData.routing && fullData.routing.enabled) {
-        if (this.selectedTunnel && this.selectedTunnel !== fullData.active_tunnel) {
-          const btnSwitch = document.createElement('button');
-          btnSwitch.className = 'btn btn-sm btn-accent';
-          btnSwitch.textContent = `Set ${this.selectedTunnel} as active route`;
-          btnSwitch.addEventListener('click', async () => {
-            btnSwitch.disabled = true;
-            try {
-              const res = await fetch(`/api/actions/switch?interface=${encodeURIComponent(this.selectedTunnel)}`, { method: 'POST' });
-              if (res.ok) {
-                this.showToast(`✓ Active route switched to ${this.selectedTunnel}`);
-                this.pollStatus();
-              } else {
-                this.showToast('Failed to switch route', true);
-              }
-            } catch (err) {
-              this.showToast('Network error: ' + err.message, true);
-            } finally {
-              btnSwitch.disabled = false;
-            }
-          });
-          this.tunnelHeaderActions.appendChild(btnSwitch);
-        }
-      }
+      this.selectedTunnel = order.length > 0 ? order[0] : null;
     }
 
     // Render tunnel tabs
@@ -683,7 +636,6 @@ class AutoWGApp {
     for (const iface of order) {
       const t = (tunnels && tunnels[iface]) || {};
       const isSelected = (iface === this.selectedTunnel);
-      const isRouteActive = (iface === fullData.active_tunnel);
 
       let dotClass = 'dot-unknown';
       if (t.state === 'CONNECTED') dotClass = 'dot-connected';
@@ -695,7 +647,6 @@ class AutoWGApp {
       btn.innerHTML = `
         <span class="tab-dot ${dotClass}"></span>
         <span class="tab-name">${t.name ? `${t.name} (${iface})` : iface}</span>
-        ${isRouteActive ? '<span class="tab-badge-route">Active Route</span>' : ''}
       `;
 
       btn.addEventListener('click', () => {
@@ -932,14 +883,8 @@ class AutoWGApp {
 
     // Form: Mode selector changes
     if (this.cfgModeClient && this.cfgModeServer) {
-      this.cfgModeClient.addEventListener('change', () => {
-        if (this.routingFieldsSection) this.routingFieldsSection.style.display = 'flex';
-        this.onConfigFormChange();
-      });
-      this.cfgModeServer.addEventListener('change', () => {
-        if (this.routingFieldsSection) this.routingFieldsSection.style.display = 'none';
-        this.onConfigFormChange();
-      });
+      this.cfgModeClient.addEventListener('change', () => this.onConfigFormChange());
+      this.cfgModeServer.addEventListener('change', () => this.onConfigFormChange());
     }
 
     // Form: Add Tunnel Button
@@ -963,7 +908,6 @@ class AutoWGApp {
 
     // Form: Listen for changes across all top-level form controls
     const formInputs = [
-      this.cfgRoutingEnabled, this.cfgRoutingTable, this.cfgRoutingMode, this.cfgRoutingMetric,
       this.cfgPostUp, this.cfgPreDown,
       this.cfgWebEnabled, this.cfgWebListen, this.cfgWebAllowedIPs, this.cfgWebUser, this.cfgWebPass,
       this.cfgStatusEnabled, this.cfgStatusListen, this.cfgStatusTitle
@@ -1120,15 +1064,6 @@ class AutoWGApp {
     const isClient = (cfg.mode || '').toLowerCase() === 'client';
     if (this.cfgModeClient) this.cfgModeClient.checked = isClient;
     if (this.cfgModeServer) this.cfgModeServer.checked = !isClient;
-    if (this.routingFieldsSection) {
-      this.routingFieldsSection.style.display = isClient ? 'flex' : 'none';
-    }
-
-    // 2. Client Route Failover
-    if (this.cfgRoutingEnabled) this.cfgRoutingEnabled.checked = cfg.routing ? cfg.routing.enabled : true;
-    if (this.cfgRoutingTable) this.cfgRoutingTable.value = cfg.routing?.table ?? 200;
-    if (this.cfgRoutingMode) this.cfgRoutingMode.value = cfg.routing?.mode || 'sticky';
-    if (this.cfgRoutingMetric) this.cfgRoutingMetric.value = cfg.routing?.metric ?? 100;
 
     // 3. Managed WireGuard Interfaces
     if (this.tunnelCardsContainer) {
@@ -1368,13 +1303,6 @@ class AutoWGApp {
   collectConfigFromForm() {
     const mode = this.cfgModeClient?.checked ? 'client' : 'server';
 
-    const routing = {
-      enabled: this.cfgRoutingEnabled ? this.cfgRoutingEnabled.checked : true,
-      table: parseInt(this.cfgRoutingTable?.value, 10) || 200,
-      mode: this.cfgRoutingMode?.value || 'sticky',
-      metric: parseInt(this.cfgRoutingMetric?.value, 10) || 100
-    };
-
     const tunnels = [];
     const cards = this.tunnelCardsContainer ? this.tunnelCardsContainer.querySelectorAll('.tunnel-form-card') : [];
     cards.forEach(card => {
@@ -1496,7 +1424,6 @@ class AutoWGApp {
 
     return {
       mode: mode,
-      routing: routing,
       tunnels: tunnels,
       post_up: postUpGlobal,
       pre_down: preDownGlobal,
@@ -1511,14 +1438,6 @@ class AutoWGApp {
     lines.push(`mode: "${cfg.mode || 'server'}"`);
     lines.push('');
 
-    if (cfg.mode === 'client' || (cfg.routing && cfg.routing.enabled)) {
-      lines.push('routing:');
-      lines.push(`  enabled: ${cfg.routing.enabled ? 'true' : 'false'}`);
-      lines.push(`  table: ${cfg.routing.table || 200}`);
-      lines.push(`  mode: "${cfg.routing.mode || 'sticky'}"`);
-      lines.push(`  metric: ${cfg.routing.metric || 100}`);
-      lines.push('');
-    }
 
     lines.push('tunnels:');
     for (const t of cfg.tunnels) {

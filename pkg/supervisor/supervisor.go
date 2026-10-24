@@ -21,8 +21,6 @@ type SupervisorStatus struct {
 	hunter.StatusReport `json:",inline"`
 
 	Mode         string                         `json:"mode"`
-	ActiveTunnel string                         `json:"active_tunnel,omitempty"`
-	Routing      config.RoutingConfig           `json:"routing"`
 	Tunnels      map[string]hunter.StatusReport `json:"tunnels"`
 	TunnelOrder  []string                       `json:"tunnel_order"`
 }
@@ -38,7 +36,6 @@ type Supervisor struct {
 	hunters       map[string]*hunter.Hunter
 	tunnelOrder   []string
 	hunterCancels map[string]context.CancelFunc
-	routeManager  *RouteManager
 	ctx           context.Context
 }
 
@@ -74,12 +71,8 @@ func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *ipta
 			}
 		}
 		s.tunnelOrder = append(s.tunnelOrder, t.Interface)
-		h := hunter.New(t, s.backendFor(t), iptMgr, log, s.handleStateChange)
+		h := hunter.New(t, s.backendFor(t), iptMgr, log, nil)
 		s.hunters[t.Interface] = h
-	}
-
-	if cfg.Mode == "client" && cfg.Routing.Enabled {
-		s.routeManager = NewRouteManager(cfg.Routing, s.hunters, s.tunnelOrder, log)
 	}
 
 	return s
@@ -94,12 +87,6 @@ func (s *Supervisor) backendFor(t config.TunnelConfig) wg.Backend {
 		return s.awgCtrl
 	}
 	return s.wgCtrl
-}
-
-func (s *Supervisor) handleStateChange(h *hunter.Hunter, oldState, newState string) {
-	if s.routeManager != nil {
-		s.routeManager.Evaluate()
-	}
 }
 
 // Start launches all tunnels, executes PostUp commands, and monitors connections.
@@ -154,14 +141,6 @@ func (s *Supervisor) Start(ctx context.Context) {
 		}(h, hCtx)
 	}
 	s.mu.Unlock()
-
-	// 3. Initial route evaluation if in client mode
-	s.mu.RLock()
-	rm := s.routeManager
-	s.mu.RUnlock()
-	if rm != nil {
-		rm.Evaluate()
-	}
 
 	// Wait for shutdown signal
 	<-ctx.Done()
@@ -225,11 +204,6 @@ func (s *Supervisor) GetStatus() SupervisorStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	active := ""
-	if s.routeManager != nil {
-		active = s.routeManager.GetActiveTunnel()
-	}
-
 	reports := make(map[string]hunter.StatusReport, len(s.hunters))
 	for iface, h := range s.hunters {
 		reports[iface] = h.GetStatus()
@@ -239,12 +213,7 @@ func (s *Supervisor) GetStatus() SupervisorStatus {
 	copy(orderCopy, s.tunnelOrder)
 
 	var primaryReport hunter.StatusReport
-	if active != "" {
-		if r, ok := reports[active]; ok {
-			primaryReport = r
-		}
-	}
-	if primaryReport.Interface == "" && len(orderCopy) > 0 {
+	if len(orderCopy) > 0 {
 		if r, ok := reports[orderCopy[0]]; ok {
 			primaryReport = r
 		}
@@ -253,8 +222,6 @@ func (s *Supervisor) GetStatus() SupervisorStatus {
 	return SupervisorStatus{
 		StatusReport: primaryReport,
 		Mode:         s.cfg.Mode,
-		ActiveTunnel: active,
-		Routing:      s.cfg.Routing,
 		Tunnels:      reports,
 		TunnelOrder:  orderCopy,
 	}
@@ -311,18 +278,6 @@ func (s *Supervisor) TriggerRebind(iface string) error {
 		return fmt.Errorf("tunnel %q not found", iface)
 	}
 	return h.TriggerRebind()
-}
-
-// SwitchActiveTunnel manually overrides the active upstream route in client mode.
-func (s *Supervisor) SwitchActiveTunnel(iface string) error {
-	s.mu.RLock()
-	rm := s.routeManager
-	s.mu.RUnlock()
-
-	if rm == nil {
-		return fmt.Errorf("route failover manager is not active (mode must be client with routing.enabled=true)")
-	}
-	return rm.ForceSwitch(iface)
 }
 
 // SaveAllHistory flushes history to disk for all tunnels.
@@ -478,7 +433,7 @@ func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) 
 			h.UpdateConfig(t)
 		} else {
 			s.log.Info("SUPERVISOR", "Adding new tunnel %s (%s)", t.Interface, t.Name)
-			h := hunter.New(t, s.backendFor(t), s.iptMgr, s.log, s.handleStateChange)
+			h := hunter.New(t, s.backendFor(t), s.iptMgr, s.log, nil)
 			s.hunters[t.Interface] = h
 			if s.ctx != nil {
 				hCtx, hCancel := context.WithCancel(s.ctx)
@@ -490,18 +445,6 @@ func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) 
 
 	s.tunnelOrder = newOrder
 	s.cfg = &newCfg
-
-	// 6. Update RouteManager
-	if newCfg.Mode == "client" && newCfg.Routing.Enabled {
-		if s.routeManager == nil {
-			s.routeManager = NewRouteManager(newCfg.Routing, s.hunters, s.tunnelOrder, s.log)
-		} else {
-			s.routeManager.UpdateRoutingConfig(newCfg.Routing, s.hunters, s.tunnelOrder)
-		}
-		s.routeManager.Evaluate()
-	} else if s.routeManager != nil {
-		s.routeManager.UpdateRoutingConfig(newCfg.Routing, s.hunters, s.tunnelOrder)
-	}
 
 	s.log.Info("SUPERVISOR", "Configuration successfully saved to %s and applied live (%d active tunnels)",
 		s.cfgPath, len(s.hunters))
