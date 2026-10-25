@@ -440,3 +440,53 @@ func TestEveryHuntChangesBothPorts(t *testing.T) {
 		prevPort, prevEP = port, ep
 	}
 }
+
+// A peer that never sends first (a MikroTik behind NAT, no keepalive towards us) only gets a handshake when
+// we send it something: with no handshake ever, the hunter pings the peer itself.
+func TestPingNudgesAHandshakeThatNeverHappened(t *testing.T) {
+	r := newLinkRig(t, config.TransportDirect)
+	r.h.cfg.TunnelPing = config.TunnelPingConfig{Enabled: true, TargetIP: "172.18.1.2"}
+
+	var mu sync.Mutex
+	var targets []string
+	release := make(chan struct{})
+	r.h.pingFn = func(ctx context.Context, target string, timeout time.Duration) bool {
+		mu.Lock()
+		targets = append(targets, target)
+		mu.Unlock()
+		<-release
+		return false
+	}
+	count := func() int { mu.Lock(); defer mu.Unlock(); return len(targets) }
+
+	r.be.setDead() // no handshake, nothing received
+	r.tick()
+	waitUntil(t, func() bool { return count() == 1 })
+	r.tick() // the first nudge is still running: no second one
+	time.Sleep(50 * time.Millisecond)
+	if count() != 1 {
+		t.Fatalf("nudges must not overlap, got %d", count())
+	}
+	close(release)
+	waitUntil(t, func() bool { return !r.h.nudging.Load() })
+
+	if targets[0] != "172.18.1.2" {
+		t.Fatalf("pinged %q", targets[0])
+	}
+	if st := r.h.GetStatus(); st.FailedPings != 0 {
+		t.Fatalf("a nudge must not count as a failed ping, got %d", st.FailedPings)
+	}
+	r.tick()
+	waitUntil(t, func() bool { return count() == 2 })
+}
+
+func waitUntil(t *testing.T, cond func() bool) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not reached")
+}

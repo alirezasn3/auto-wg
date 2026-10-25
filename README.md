@@ -209,7 +209,7 @@ sudo ./autowg --uninstall
 | `check_interval` | duration | `3s` | Interval between handshake and reachability polls |
 | `handshake_timeout` | duration | `60s` | Stale handshake threshold triggering reachability checks |
 | `cycle_timeout` | duration | `8s` | Alternating stagger window to prevent peer collision |
-| `tunnel_ping.enabled` | bool | `true` | Active ICMP ping verification before hunting |
+| `tunnel_ping.enabled` | bool | `true` | Active ICMP ping verification before hunting. While a tunnel has never had a handshake, Auto-WG also pings the target every check interval (result ignored): WireGuard only starts a handshake when it has a packet to send, so a peer that never sends first (MikroTik, devices behind NAT without keepalive) would otherwise stay down until someone pings it |
 | `tunnel_ping.target_ip` | string | `""` | In-tunnel IP of the remote peer to ping |
 | `tunnel_ping.failure_threshold` | int | `3` | Consecutive ping timeouts before declaring link down |
 | `transport` | string | `direct` | How WireGuard's packets travel: `direct` (UDP), `tls` or `ssh`. See [WireGuard over TLS or SSH](#-wireguard-over-tls-or-ssh). With `tls` or `ssh`, `port_range` and `remote_port_range` are **TCP** ranges and the tunnel does not hunt UDP ports |

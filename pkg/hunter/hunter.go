@@ -161,6 +161,8 @@ type Hunter struct {
 	deadSince     time.Time // when the current dead period began
 	lastLinkReset time.Time // when the link was last rebuilt in this dead period
 	wgListenPort  atomic.Int32
+	pingFn        func(ctx context.Context, target string, timeout time.Duration) bool
+	nudging       atomic.Bool
 	now           func() time.Time
 }
 
@@ -241,6 +243,7 @@ func New(tunnelCfg config.TunnelConfig, wgCtrl wg.Backend, iptMgr *iptables.Mana
 		events:            make([]ConnectionEvent, 0, 50),
 		manualTrigger:     make(chan string, 10),
 		newTunnel:         newLinkTunnel,
+		pingFn:            ping.Ping,
 		now:               time.Now,
 	}
 	h.loadHistory()
@@ -702,7 +705,7 @@ func (h *Hunter) tick(ctx context.Context) {
 	if pingEnabled && pingTarget != "" {
 		if hasHandshakeEver || rxProgress {
 			h.mu.Unlock()
-			pingOK := ping.Ping(ctx, pingTarget, pingTimeout)
+			pingOK := h.pingFn(ctx, pingTarget, pingTimeout)
 			h.mu.Lock()
 
 			if pingOK {
@@ -761,6 +764,10 @@ func (h *Hunter) tick(ctx context.Context) {
 			}
 		} else {
 			h.pingVerified = false
+			// WireGuard only starts a handshake when it has a packet to send. A peer that never sends first
+			// (a MikroTik or any device behind NAT with no keepalive towards us) would stay unreachable until
+			// someone pings it, so send that ping ourselves; its result does not count.
+			h.nudgeHandshake(ctx, pingTarget, pingTimeout)
 		}
 	} else {
 		// Ping is disabled or no target: rely on passive WireGuard handshake & rxProgress
@@ -1258,3 +1265,15 @@ func (h *Hunter) UpdateConfig(newCfg config.TunnelConfig) {
 		h.cfg.Interface, h.huntingEnabled, h.cfg.PortRange, h.targetIPs)
 }
 
+
+// nudgeHandshake sends one in-tunnel ping in the background to make WireGuard start a handshake towards a
+// peer it has never completed one with. At most one nudge runs at a time.
+func (h *Hunter) nudgeHandshake(ctx context.Context, target string, timeout time.Duration) {
+	if !h.nudging.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer h.nudging.Store(false)
+		h.pingFn(ctx, target, timeout)
+	}()
+}
