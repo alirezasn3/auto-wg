@@ -63,6 +63,10 @@ func New(cfgPath string, cfg *config.Config, wgCtrl *wg.Controller, iptMgr *ipta
 	cfgDir := filepath.Dir(cfgPath)
 
 	for _, t := range cfg.Tunnels {
+		if !t.IsEnabled() {
+			log.Info("SUPERVISOR", "[%s] Tunnel is disabled in the configuration; not starting it", t.Interface)
+			continue
+		}
 		if t.HistoryFile != "off" && t.HistoryFile != "none" {
 			if t.HistoryFile == "" {
 				t.HistoryFile = filepath.Join(cfgDir, fmt.Sprintf("history-%s.json", t.Interface))
@@ -399,6 +403,9 @@ func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) 
 	newTunnelMap := make(map[string]config.TunnelConfig, len(newCfg.Tunnels))
 	var newOrder []string
 	for _, t := range newCfg.Tunnels {
+		if !t.IsEnabled() {
+			continue // a disabled tunnel is stopped like a removed one
+		}
 		newTunnelMap[t.Interface] = t
 		newOrder = append(newOrder, t.Interface)
 	}
@@ -411,7 +418,7 @@ func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) 
 			if changed {
 				s.log.Info("SUPERVISOR", "Recreating tunnel %s (backend changed to %s)", iface, nt.Backend)
 			} else {
-				s.log.Info("SUPERVISOR", "Removing tunnel %s (omitted from new configuration)", iface)
+				s.log.Info("SUPERVISOR", "Stopping tunnel %s (removed or disabled in the new configuration)", iface)
 			}
 			if cancel, ok := s.hunterCancels[iface]; ok {
 				cancel()
@@ -429,6 +436,9 @@ func (s *Supervisor) SaveAndApplyConfig(yamlStr string) (*config.Config, error) 
 
 	// 5. Update existing tunnels or start newly added ones
 	for _, t := range newCfg.Tunnels {
+		if !t.IsEnabled() {
+			continue
+		}
 		if h, exists := s.hunters[t.Interface]; exists {
 			h.UpdateConfig(t)
 		} else {

@@ -38,6 +38,7 @@ type TunnelConfig struct {
 	PeerPublicKey    string           `yaml:"peer_public_key,omitempty" json:"peer_public_key,omitempty"` // Optional peer public key
 	PortRange        string           `yaml:"port_range" json:"port_range"` // Local forwarded port range (UDP for transport direct, TCP for tls and ssh)
 	RemotePortRange  string           `yaml:"remote_port_range" json:"remote_port_range"` // Remote peer's port range (UDP for transport direct, TCP for tls and ssh)
+	Enabled          *bool            `yaml:"enabled,omitempty" json:"enabled,omitempty"` // false keeps the tunnel in the file but does not run it (default: true)
 	Hunting          *bool            `yaml:"hunting,omitempty" json:"hunting,omitempty"` // Enable autonomous port hunting (default: true). Set false for passive/MikroTik peers!
 	Passive          bool             `yaml:"passive,omitempty" json:"passive,omitempty"` // Alias for hunting: false (monitor & ping only, no port rotation)
 	CheckInterval    time.Duration    `yaml:"check_interval" json:"check_interval"`       // Check frequency (default: 3s)
@@ -441,7 +442,7 @@ func Validate(cfg *Config) error {
 			return fmt.Errorf("tunnel %q: %w", iface, err)
 		}
 
-		if t.Iptables && t.PortRange != "" {
+		if t.Iptables && t.IsEnabled() && t.PortRange != "" {
 			start, end, err := ParsePortRange(t.PortRange)
 			if err != nil {
 				return fmt.Errorf("tunnel %q port_range error: %w", iface, err)
@@ -463,6 +464,9 @@ func Validate(cfg *Config) error {
 
 	return nil
 }
+
+// IsEnabled reports whether the tunnel should run: tunnels are enabled unless `enabled: false`.
+func (t TunnelConfig) IsEnabled() bool { return t.Enabled == nil || *t.Enabled }
 
 // ParsePortRange parses a range string like "20000-30000" into start and end integers.
 func ParsePortRange(spec string) (int, int, error) {

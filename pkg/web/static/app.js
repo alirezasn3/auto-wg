@@ -1055,6 +1055,19 @@ class AutoWGApp {
     if (!this.tunnelFormCount || !this.tunnelCardsContainer) return;
     const count = this.tunnelCardsContainer.querySelectorAll('.tunnel-form-card').length;
     this.tunnelFormCount.textContent = `${count} tunnel${count === 1 ? '' : 's'}`;
+    this.refreshOrderButtons();
+  }
+
+  // The first card cannot move up and the last cannot move down.
+  refreshOrderButtons() {
+    if (!this.tunnelCardsContainer) return;
+    const cards = [...this.tunnelCardsContainer.querySelectorAll('.tunnel-form-card')];
+    cards.forEach((c, i) => {
+      const up = c.querySelector('.btn-move-up');
+      const down = c.querySelector('.btn-move-down');
+      if (up) up.disabled = i === 0;
+      if (down) down.disabled = i === cards.length - 1;
+    });
   }
 
   renderConfigForm(cfg) {
@@ -1108,6 +1121,7 @@ class AutoWGApp {
       : (tunnel.target_ip ? [tunnel.target_ip] : []);
 
     const isHunting = tunnel.hunting !== false;
+    const isEnabled = tunnel.enabled !== false;
     const isIptables = tunnel.iptables !== false;
     const ping = tunnel.tunnel_ping || {};
     const tls = tunnel.tls || {};
@@ -1120,11 +1134,18 @@ class AutoWGApp {
     const area = (cls, value, rows, placeholder = '') =>
       `<textarea class="form-textarea ${cls}" rows="${rows}" placeholder="${escapeHtml(placeholder)}" spellcheck="false">${escapeHtml(value)}</textarea>`;
 
+    card.classList.toggle('disabled', !isEnabled);
+
     card.innerHTML = `
       <summary class="tunnel-card-header">
         <span class="tunnel-card-title">${escapeHtml(tunnel.interface || 'new_wg')}</span>
         <span class="tunnel-card-name-tag">${escapeHtml(tunnel.name || '')}</span>
         <span class="tunnel-card-badge ${isHunting ? 'hunting' : 'passive'}">${isHunting ? 'Hunting' : 'Passive'}</span>
+        <span class="tunnel-order">
+          <button type="button" class="btn-order btn-move-up" title="Move up" aria-label="Move up">▲</button>
+          <button type="button" class="btn-order btn-move-down" title="Move down" aria-label="Move down">▼</button>
+        </span>
+        ${formToggle('t-enabled', isEnabled, 'Enabled')}
         <button type="button" class="btn-danger-sm btn-remove-tunnel" title="Remove this tunnel">Remove</button>
       </summary>
 
@@ -1278,6 +1299,24 @@ class AutoWGApp {
       e.currentTarget.textContent = secretEl.type === 'password' ? 'Show' : 'Hide';
     });
 
+    // Controls inside <summary>: keep their clicks from folding the card
+    const enabledInput = card.querySelector('.t-enabled');
+    const enabledLabel = enabledInput?.closest('label');
+    enabledLabel?.addEventListener('click', (e) => e.stopPropagation());
+    enabledInput?.addEventListener('change', () => card.classList.toggle('disabled', !enabledInput.checked));
+
+    const move = (dir) => (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const sibling = dir < 0 ? card.previousElementSibling : card.nextElementSibling;
+      if (!sibling) return;
+      if (dir < 0) sibling.before(card); else sibling.after(card);
+      this.refreshOrderButtons();
+      this.onConfigFormChange();
+    };
+    card.querySelector('.btn-move-up')?.addEventListener('click', move(-1));
+    card.querySelector('.btn-move-down')?.addEventListener('click', move(1));
+
     // Remove lives inside <summary>, so keep the click from folding the card
     const btnRemove = card.querySelector('.btn-remove-tunnel');
     btnRemove?.addEventListener('click', (e) => {
@@ -1311,6 +1350,7 @@ class AutoWGApp {
       const portRange = card.querySelector('.t-port-range')?.value.trim() || '20000-30000';
       const remotePortRange = card.querySelector('.t-remote-port-range')?.value.trim() || '20000-30000';
       const hunting = card.querySelector('.t-hunting')?.checked ?? true;
+      const enabled = card.querySelector('.t-enabled')?.checked ?? true;
       const iptables = card.querySelector('.t-iptables')?.checked ?? true;
       const peerPubKey = card.querySelector('.t-peer-pubkey')?.value.trim() || '';
       const backend = card.querySelector('.t-backend')?.value || 'wireguard';
@@ -1371,6 +1411,7 @@ class AutoWGApp {
         port_range: portRange,
         remote_port_range: remotePortRange,
         hunting: hunting,
+        enabled: enabled,
         iptables: iptables,
         target_ips: targetIps,
         target_ip: targetIps.length > 0 ? targetIps[0] : '',
@@ -1446,6 +1487,7 @@ class AutoWGApp {
       if (t.name) lines.push(`    name: "${t.name}"`);
       if (t.port_range) lines.push(`    port_range: "${t.port_range}"`);
       if (t.remote_port_range) lines.push(`    remote_port_range: "${t.remote_port_range}"`);
+      if (t.enabled === false) lines.push('    enabled: false');
       if (t.hunting !== undefined) lines.push(`    hunting: ${t.hunting ? 'true' : 'false'}`);
       if (t.iptables !== undefined) lines.push(`    iptables: ${t.iptables ? 'true' : 'false'}`);
       if (t.peer_public_key) lines.push(`    peer_public_key: "${t.peer_public_key}"`);

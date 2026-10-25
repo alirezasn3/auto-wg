@@ -202,6 +202,7 @@ sudo ./autowg --uninstall
 | `target_ips` | list of string | `[]` | Candidate destination IPs / domain names (IPv4 & IPv6) rotated during hunting |
 | `port_range` | string | `20000-30000` | Local port range forwarded to WireGuard listen port |
 | `remote_port_range` | string | `20000-30000` | Remote peer's forwarded port range |
+| `enabled` | bool | `true` | `false` keeps the tunnel in the file but does not run it (no hunter, no iptables rules, hidden from the dashboard). Toggle it in the web editor and Save & apply, no restart needed. Tunnels are listed in the dashboard in the order they appear in `tunnels:`; the editor has ▲/▼ buttons to reorder them |
 | `hunting` | bool | `true` | Enable autonomous port hunting. Set `false` for passive / MikroTik peers |
 | `passive` | bool | `false` | Alias for `hunting: false` (monitors tunnel and pings without port rotation) |
 | `iptables` | bool | `false` | Let Auto-WG manage the NAT redirect rules described under [Firewall rules](#-firewall-rules-auto-wg-creates). **Off when the key is missing**; the web editor and the config generated on first run write `true` |

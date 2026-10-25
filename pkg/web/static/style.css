@@ -367,8 +367,17 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .tunnel-card-title { font-family: var(--font-mono); font-weight: 600; }
 .tunnel-card-name-tag { color: var(--text-muted); font-size: 13px; margin-right: auto; }
 .tunnel-card-name-tag:empty { display: none; }
-.tunnel-card-header .btn-remove-tunnel { margin-left: auto; }
-.tunnel-card-name-tag:not(:empty) ~ .btn-remove-tunnel { margin-left: 0; }
+.tunnel-order { display: inline-flex; gap: 2px; }
+.btn-order { border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); border-radius: 6px; width: 26px; height: 24px; font-size: 10px; line-height: 1; cursor: pointer; }
+.btn-order:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn-order:disabled { opacity: 0.35; cursor: default; }
+.tunnel-card-header .tunnel-order { margin-left: auto; }
+.tunnel-card-name-tag:not(:empty) ~ .tunnel-order { margin-left: 0; }
+.tunnel-card-header .switch-label { margin: 0; }
+.tunnel-form-card.disabled > .tunnel-card-header .tunnel-card-title,
+.tunnel-form-card.disabled > .tunnel-card-header .tunnel-card-name-tag,
+.tunnel-form-card.disabled > .tunnel-card-header .tunnel-card-badge { opacity: 0.45; text-decoration: line-through; }
+.tunnel-form-card.disabled > .tunnel-body { opacity: 0.55; }
 .tunnel-card-badge { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; }
 .tunnel-card-badge.hunting { background: var(--accent-soft); color: var(--success); }
 .tunnel-card-badge.passive { background: var(--surface-2); color: var(--text-muted); }

@@ -2,8 +2,10 @@ package supervisor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -202,3 +204,105 @@ tunnels:
 	}
 }
 
+
+func newTestSupervisor(t *testing.T, yaml string) *Supervisor {
+	t.Helper()
+	cfgFile := t.TempDir() + "/config.yaml"
+	if err := os.WriteFile(cfgFile, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+	log := logger.New(io.Discard, logger.LevelDebug, 100)
+	wgCtrl, _ := wg.NewController(log)
+	cfg, err := config.LoadConfig(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return New(cfgFile, cfg, wgCtrl, iptables.NewManager(log), log)
+}
+
+const twoTunnels = `mode: "server"
+tunnels:
+  - interface: "wg0"
+    enabled: %s
+    port_range: "20000-24999"
+    history_file: "off"
+  - interface: "wg1"
+    port_range: "25000-29999"
+    history_file: "off"
+`
+
+func TestDisabledTunnelsAreNotSupervised(t *testing.T) {
+	sup := newTestSupervisor(t, fmt.Sprintf(twoTunnels, "false"))
+	st := sup.GetStatus()
+	if len(st.TunnelOrder) != 1 || st.TunnelOrder[0] != "wg1" || len(st.Tunnels) != 1 {
+		t.Fatalf("a disabled tunnel must not be started or shown, got order %v", st.TunnelOrder)
+	}
+	// It stays in the configuration, so enabling it later needs no retyping.
+	if got := len(sup.GetConfig().Tunnels); got != 2 {
+		t.Fatalf("the disabled tunnel must stay in the config, got %d tunnels", got)
+	}
+}
+
+func TestEnablingAndDisablingTunnelsLive(t *testing.T) {
+	sup := newTestSupervisor(t, fmt.Sprintf(twoTunnels, "true"))
+	if got := sup.GetStatus().TunnelOrder; len(got) != 2 || got[0] != "wg0" {
+		t.Fatalf("setup: %v", got)
+	}
+
+	if _, err := sup.SaveAndApplyConfig(fmt.Sprintf(twoTunnels, "false")); err != nil {
+		t.Fatal(err)
+	}
+	if got := sup.GetStatus().TunnelOrder; len(got) != 1 || got[0] != "wg1" {
+		t.Fatalf("disabling must stop wg0, got %v", got)
+	}
+
+	if _, err := sup.SaveAndApplyConfig(fmt.Sprintf(twoTunnels, "true")); err != nil {
+		t.Fatal(err)
+	}
+	if got := sup.GetStatus().TunnelOrder; len(got) != 2 {
+		t.Fatalf("enabling must start wg0 again, got %v", got)
+	}
+}
+
+func TestTunnelOrderFollowsTheConfig(t *testing.T) {
+	sup := newTestSupervisor(t, fmt.Sprintf(twoTunnels, "true"))
+	swapped := `mode: "server"
+tunnels:
+  - interface: "wg1"
+    port_range: "25000-29999"
+    history_file: "off"
+  - interface: "wg0"
+    port_range: "20000-24999"
+    history_file: "off"
+`
+	if _, err := sup.SaveAndApplyConfig(swapped); err != nil {
+		t.Fatal(err)
+	}
+	got := sup.GetStatus().TunnelOrder
+	if len(got) != 2 || got[0] != "wg1" || got[1] != "wg0" {
+		t.Fatalf("expected the new order wg1, wg0, got %v", got)
+	}
+}
+
+func TestDisabledTunnelDoesNotCountForPortOverlap(t *testing.T) {
+	sup := newTestSupervisor(t, fmt.Sprintf(twoTunnels, "true"))
+	overlap := `mode: "server"
+tunnels:
+  - interface: "wg0"
+    enabled: false
+    port_range: "20000-26000"
+    iptables: true
+    history_file: "off"
+  - interface: "wg1"
+    port_range: "25000-29999"
+    iptables: true
+    history_file: "off"
+`
+	if _, err := sup.SaveAndApplyConfig(overlap); err != nil {
+		t.Fatalf("a disabled tunnel's range must not conflict: %v", err)
+	}
+	enabledBoth := strings.Replace(overlap, "enabled: false", "enabled: true", 1)
+	if _, err := sup.SaveAndApplyConfig(enabledBoth); err == nil {
+		t.Fatal("enabling both overlapping tunnels must be refused")
+	}
+}
